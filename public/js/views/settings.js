@@ -55,6 +55,86 @@
       </section>`;
   }
 
+  function installerDownloadPanel() {
+    return `
+      <section class="panel" id="descargar-pc">
+        <div class="panel-head">
+          <div>
+            <h3>Descargar Pan Launcher para PC (Windows y Linux)</h3>
+            <p>Descarga los instaladores autónomos para usar el launcher o subirlos directamente a tu página web.</p>
+          </div>
+          <span class="badge badge-release">Windows + Linux</span>
+        </div>
+        <div class="download-grid">
+          <article class="download-card download-card-primary">
+            <div>
+              <div class="download-card-head">
+                <strong>Windows Instalador (.exe)</strong>
+                <span class="badge badge-release">Principal</span>
+              </div>
+              <p>Instalador directo <code>Pan-launcher-Setup.exe</code> listo para publicar en tu web.</p>
+            </div>
+            <a class="btn btn-primary btn-sm"
+               href="/api/pc/download-app?os=windows&format=exe"
+               download="Pan-launcher-Setup.exe">
+              <span data-icon="download"></span> Descargar Windows (.exe)
+            </a>
+          </article>
+
+          <article class="download-card">
+            <div>
+              <div class="download-card-head">
+                <strong>Windows Paquete (.zip)</strong>
+                <span class="badge">Sin bloqueos</span>
+              </div>
+              <p>Incluye el <code>.exe</code> y <code>Instalar-Guiado.cmd</code> con soporte completo de Java 25 (26.3).</p>
+            </div>
+            <a class="btn btn-outline-accent btn-sm"
+               href="/api/pc/download-app?os=windows&format=zip"
+               download="Pan-launcher-Windows.zip">
+              <span data-icon="download"></span> Descargar Windows (.zip)
+            </a>
+          </article>
+
+          <article class="download-card">
+            <div>
+              <div class="download-card-head">
+                <strong>Linux Lanzador (.sh)</strong>
+                <span class="badge badge-release">Ubuntu / Arch / Fedora</span>
+              </div>
+              <p>Script autónomo con motor local en Python 3, descarga automática de Java 8/17/21/25, Fabric y mods FPS.</p>
+            </div>
+            <a class="btn btn-outline-accent btn-sm"
+               href="/api/pc/download-app?os=unix"
+               download="Pan-launcher.sh">
+              <span data-icon="download"></span> Descargar Linux (.sh)
+            </a>
+          </article>
+
+          <article class="download-card">
+            <div>
+              <div class="download-card-head">
+                <strong>Linux / macOS (.zip)</strong>
+                <span class="badge">Comprimido</span>
+              </div>
+              <p>Archivo ZIP con permisos de ejecución <code>Pan-launcher-MacLinux.zip</code> listo para compartir.</p>
+            </div>
+            <a class="btn btn-sm"
+               href="/api/pc/download-app?os=unix&format=zip"
+               download="Pan-launcher-MacLinux.zip">
+              <span data-icon="download"></span> Descargar Linux (.zip)
+            </a>
+          </article>
+        </div>
+
+        <div class="guide-steps">
+          <div><strong>Cómo usar en Windows:</strong> descarga <code>Pan-launcher-Setup.exe</code> (si SmartScreen avisa: «Más información» → «Ejecutar de todas formas») o extrae <code>Pan-launcher-Windows.zip</code> y abre <code>Instalar-Guiado.cmd</code>.</div>
+          <div><strong>Cómo usar en Linux:</strong> abre la terminal en Descargas y ejecuta <code>chmod +x Pan-launcher.sh && ./Pan-launcher.sh</code> (crea acceso directo en tu menú de aplicaciones).</div>
+          <div><strong>Cómo publicarlo en tu página web:</strong> descarga estos archivos aquí y súbelos a tu hosting o a <strong>GitHub Releases</strong> (carpeta <code>/descargas/</code> o URL del release) enlazándolos con <code>&lt;a href="Pan-launcher-Setup.exe" download&gt;</code>.</div>
+        </div>
+      </section>`;
+  }
+
   Nexus.views.settings = function (state) {
     const language = state.config.general.language;
     const closeBehavior = state.config.general.closeBehavior || 'quit';
@@ -62,8 +142,10 @@
     return `
       <div class="page">
         ${settingsTabs('settings')}
-        ${pageHead('AJUSTES', 'Configuración general',
-          'Preferencias de la aplicación. Los cambios se escriben de forma segura en un archivo JSON dentro del directorio de datos de Pan Launcher.')}
+        ${pageHead('AJUSTES', 'Configuración general y descargas',
+          'Descarga Pan Launcher para Windows o Linux y ajusta las preferencias locales de la aplicación.')}
+
+        ${installerDownloadPanel()}
 
         <section class="panel">
           <div class="settings-row">

@@ -311,13 +311,75 @@
     };
   }
 
+  const FALLBACK_MC_VERSIONS = [
+    { id: '26.3', type: 'release', releaseTime: '2026-04-01T12:00:00Z' },
+    { id: '1.21.11', type: 'release', releaseTime: '2026-01-15T12:00:00Z' },
+    { id: '1.21.4', type: 'release', releaseTime: '2024-12-03T12:00:00Z' },
+    { id: '1.21.3', type: 'release', releaseTime: '2024-10-23T12:00:00Z' },
+    { id: '1.21.1', type: 'release', releaseTime: '2024-08-08T12:00:00Z' },
+    { id: '1.20.4', type: 'release', releaseTime: '2023-12-07T12:00:00Z' },
+    { id: '1.20.1', type: 'release', releaseTime: '2023-06-12T12:00:00Z' },
+    { id: '1.19.4', type: 'release', releaseTime: '2023-03-14T12:00:00Z' },
+    { id: '1.18.2', type: 'release', releaseTime: '2022-02-28T12:00:00Z' },
+    { id: '1.16.5', type: 'release', releaseTime: '2021-01-15T12:00:00Z' },
+    { id: '1.12.2', type: 'release', releaseTime: '2017-09-18T12:00:00Z' },
+    { id: '1.8.9', type: 'release', releaseTime: '2015-12-09T12:00:00Z' }
+  ];
+
+  let localHostHealthCache = null;
+
+  async function checkLocalHostHealth() {
+    if (localHostHealthCache) return localHostHealthCache;
+    try {
+      const resp = await fetch('/api/health', { cache: 'no-store' });
+      const ct = resp.headers.get('content-type') || '';
+      if (resp.ok && ct.includes('application/json')) {
+        const data = await resp.json();
+        if (data && data.ok) {
+          localHostHealthCache = {
+            canLaunchJava: Boolean(data.canLaunchJava),
+            service: data.service || 'local'
+          };
+          return localHostHealthCache;
+        }
+      }
+    } catch {
+      // Ignore network errors
+    }
+    return { canLaunchJava: false, service: 'web' };
+  }
+
   async function apiFetchJson(url) {
     const response = await fetch(url, { cache: 'no-store' });
+    const ct = response.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) {
+      throw new Error(`Endpoint no JSON (${response.status})`);
+    }
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
       throw new Error((data && data.error) || `Error HTTP ${response.status}`);
     }
     return data;
+  }
+
+  function makeBuiltinSkinDataUrl(primary, secondary, accent) {
+    try {
+      const c = document.createElement('canvas');
+      c.width = 64;
+      c.height = 64;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = primary;
+      ctx.fillRect(0, 0, 64, 64);
+      ctx.fillStyle = secondary;
+      ctx.fillRect(8, 8, 8, 8);
+      ctx.fillRect(20, 20, 8, 12);
+      ctx.fillStyle = accent;
+      ctx.fillRect(9, 11, 2, 2);
+      ctx.fillRect(13, 11, 2, 2);
+      return c.toDataURL('image/png');
+    } catch {
+      return '';
+    }
   }
 
   // Estado activo de descargas e instalaciones
@@ -518,7 +580,26 @@
         const res = await apiFetchJson('/api/pan/default-skins');
         defaultSkinsCache = Array.isArray(res.items) ? res.items : [];
       } catch {
-        defaultSkinsCache = [];
+        defaultSkinsCache = [
+          {
+            id: 'official:steve',
+            name: 'Steve Clásico',
+            model: 'classic',
+            width: 64,
+            height: 64,
+            source: 'official',
+            dataUrl: makeBuiltinSkinDataUrl('#2d7d9a', '#c9936d', '#3e2d8f')
+          },
+          {
+            id: 'official:alex',
+            name: 'Alex Slim',
+            model: 'slim',
+            width: 64,
+            height: 64,
+            source: 'official',
+            dataUrl: makeBuiltinSkinDataUrl('#4b7f36', '#e0b08a', '#2c6b31')
+          }
+        ];
       }
     }
     const merged = [...defaultSkinsCache, ...store.skinsLocal];
@@ -577,15 +658,61 @@
     versions: Object.freeze({
       list: async (options) => {
         const force = Boolean(options && options.force);
-        return apiFetchJson(`/api/pan/versions${force ? '?force=true' : ''}`);
+        try {
+          return await apiFetchJson(`/api/pan/versions${force ? '?force=true' : ''}`);
+        } catch {
+          try {
+            const mc = await apiFetchJson('/api/mc/versions');
+            if (mc && Array.isArray(mc.versions) && mc.versions.length) {
+              return { items: mc.versions, stale: false, source: 'local-host' };
+            }
+          } catch {
+            // Fall through to Mojang direct
+          }
+          try {
+            const resp = await fetch('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json');
+            if (resp.ok) {
+              const m = await resp.json();
+              return { items: Array.isArray(m.versions) ? m.versions : FALLBACK_MC_VERSIONS, stale: false, source: 'mojang' };
+            }
+          } catch {
+            // Fall through to curated list
+          }
+          return { items: FALLBACK_MC_VERSIONS, stale: true, warning: 'Catálogo local sin conexión.', source: 'cache' };
+        }
       }
     }),
     catalogs: Object.freeze({
       get: async (kind, gameVersion, options) => {
         const force = Boolean(options && options.force);
-        return apiFetchJson(
-          `/api/pan/catalog/${encodeURIComponent(kind)}/${encodeURIComponent(gameVersion || '1.21.4')}${force ? '?force=true' : ''}`
-        );
+        const gv = gameVersion || '1.21.4';
+        try {
+          return await apiFetchJson(
+            `/api/pan/catalog/${encodeURIComponent(kind)}/${encodeURIComponent(gv)}${force ? '?force=true' : ''}`
+          );
+        } catch {
+          if (kind === 'fabric') {
+            try {
+              const resp = await fetch(`https://meta.fabricmc.net/v2/versions/loader/${encodeURIComponent(gv)}`);
+              if (resp.ok) {
+                const list = await resp.json();
+                return {
+                  items: (Array.isArray(list) ? list : []).map((row) => ({
+                    id: row.loader && row.loader.version,
+                    stable: Boolean(row.loader && row.loader.stable)
+                  })).filter((x) => x.id),
+                  loader: 'fabric',
+                  gameVersion: gv,
+                  stale: false,
+                  source: 'fabric-meta'
+                };
+              }
+            } catch {
+              // ignore
+            }
+          }
+          return { items: [], loader: kind, gameVersion: gv, stale: true, warning: 'Sin catálogo remoto disponible.', source: 'cache' };
+        }
       }
     }),
     install: Object.freeze({
@@ -1073,9 +1200,33 @@
       }),
       versions: async (loader, gameVersion, options) => {
         const force = Boolean(options && options.force);
-        return apiFetchJson(
-          `/api/pan/loaders/${encodeURIComponent(loader)}/${encodeURIComponent(gameVersion)}${force ? '?force=true' : ''}`
-        );
+        try {
+          return await apiFetchJson(
+            `/api/pan/loaders/${encodeURIComponent(loader)}/${encodeURIComponent(gameVersion)}${force ? '?force=true' : ''}`
+          );
+        } catch {
+          if (loader === 'fabric') {
+            try {
+              const resp = await fetch(`https://meta.fabricmc.net/v2/versions/loader/${encodeURIComponent(gameVersion)}`);
+              if (resp.ok) {
+                const list = await resp.json();
+                return {
+                  items: (Array.isArray(list) ? list : []).map((row) => ({
+                    id: row.loader && row.loader.version,
+                    stable: Boolean(row.loader && row.loader.stable)
+                  })).filter((x) => x.id),
+                  loader,
+                  gameVersion,
+                  stale: false,
+                  source: 'fabric-meta'
+                };
+              }
+            } catch {
+              // ignore
+            }
+          }
+          return { items: [], loader, gameVersion, stale: true, source: 'cache' };
+        }
       },
       install: async (request) => {
         const loader = String((request && request.loader) || '');
@@ -1168,7 +1319,7 @@
       },
       onProgress: (listener) => subscribe(listeners.loaderProgress, listener)
     }),
-    launch: Object.freeze({
+      launch: Object.freeze({
       preflight: async () => {
         const activeInst = store.installations.find((item) => item.id === store.config.launch.activeInstallationId) || null;
         const versionId = activeInst ? activeInst.versionId : store.config.launch.versionId;
@@ -1222,14 +1373,125 @@
         if (!preflight.ready) {
           throw new Error((preflight.reasons[0] && preflight.reasons[0].message) || 'Faltan requisitos para iniciar.');
         }
+
+        const health = await checkLocalHostHealth();
+        if (!health.canLaunchJava) {
+          launchState.versionId = preflight.versionId;
+          launchState.status = 'error';
+          launchState.active = null;
+          launchState.error = 'Para abrir Minecraft Java real descarga e inicia Pan Launcher (.exe/.zip en Windows o .sh en Linux) desde Ajustes.';
+          addLaunchLine('info', `[Pan] Preflight correcto: ${preflight.versionId} (${preflight.mode === 'offline' ? 'Offline' : 'Online'} · ${preflight.profile.name})`);
+          addLaunchLine('stderr', '[Pan] Vista previa web: descarga la app de escritorio en Ajustes para iniciar el proceso JVM local.');
+          emit(listeners.launchStatus, clone(launchState));
+          throw new Error(launchState.error);
+        }
+
+        const activeInst = store.installations.find((item) => item.id === store.config.launch.activeInstallationId) || null;
+        const mcVersion = activeInst ? activeInst.gameVersion : (preflight.versionId || '1.21.4');
+        const rawLoader = activeInst ? activeInst.loader : ((store.config.performance && store.config.performance.exportLoader) || 'Fabric');
+        const loader = rawLoader.charAt(0).toUpperCase() + rawLoader.slice(1).toLowerCase();
+        const ramMb = activeInst ? activeInst.ramMb : (store.config.launch.ramMb || 4096);
+        const perfEval = window.Nexus && window.Nexus.perfEngine
+          ? window.Nexus.perfEngine.evaluateFromConfig(store.config)
+          : null;
+        const perfCfg = store.config.performance || {};
+        const enabledModIds = perfEval
+          ? perfEval.mods.filter((m) => m.enabled && m.id !== 'optifine').map((m) => m.id)
+          : (Array.isArray(perfCfg.modIds) ? perfCfg.modIds : []);
+
+        const payload = {
+          profileId: (activeInst && activeInst.id) || (perfEval && perfEval.presetId) || 'default',
+          profileName: (activeInst && activeInst.name) || (perfEval && perfEval.presetName) || 'Pan Launcher',
+          mcVersion,
+          loader: loader === 'Vanilla' ? 'Vanilla' : loader,
+          ramGb: Math.max(1, Number((ramMb / 1024).toFixed(2))),
+          gc: (perfEval && perfEval.jvm && perfEval.jvm.gc) || perfCfg.gc || 'ZGC',
+          alwaysPreTouch: perfCfg.alwaysPreTouch !== false,
+          stringDeduplication: Boolean(perfCfg.stringDeduplication),
+          parallelThreads: Number(perfCfg.parallelThreads) || 4,
+          customJavaPath: (activeInst && activeInst.javaPath) || store.config.launch.javaPath || '',
+          username: preflight.profile.name,
+          uuid: preflight.profile.id,
+          accountType: preflight.mode === 'offline' ? 'offline' : 'msa',
+          enabledModIds,
+          optionsTxt: perfEval ? perfEval.optionsTxt : ''
+        };
+
+        const launchResp = await fetch('/api/local/launch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const launchResData = await launchResp.json().catch(() => ({}));
+        if (!launchResp.ok || !launchResData.ok) {
+          throw new Error(launchResData.error || 'El motor local rechazó el inicio de Minecraft.');
+        }
+
+        const reqJavaMajor = requiredJavaFor(mcVersion);
         launchState.versionId = preflight.versionId;
-        launchState.status = 'error';
-        launchState.active = null;
-        launchState.error = 'La ejecución real de Minecraft Java Edition requiere ejecutar Pan Launcher en tu PC (este entorno web no dispone de GPU ni runtime Java local).';
-        addLaunchLine('info', `[Pan] Preflight correcto: ${preflight.versionId} (${preflight.mode === 'offline' ? 'Offline' : 'Online'} · ${preflight.profile.name})`);
-        addLaunchLine('stderr', '[Pan] Entorno navegador web: descarga e inicia Pan Launcher en PC para lanzar el proceso JVM de Minecraft.');
+        launchState.status = 'preparing';
+        launchState.error = null;
+        launchState.active = {
+          versionId: preflight.versionId,
+          mode: preflight.mode,
+          ramMb,
+          javaMajor: reqJavaMajor,
+          pid: null
+        };
         emit(listeners.launchStatus, clone(launchState));
-        throw new Error(launchState.error);
+
+        let shutdownTriggered = false;
+        const pollTimer = window.setInterval(async () => {
+          try {
+            const stResp = await fetch('/api/local/status', { cache: 'no-store' });
+            if (!stResp.ok) return;
+            const st = await stResp.json();
+            if (Array.isArray(st.logs)) {
+              launchState.lines = st.logs.slice(-40).map((text) => ({ level: 'info', text, at: new Date().toISOString() }));
+            }
+            if (st.state === 'error') {
+              window.clearInterval(pollTimer);
+              launchState.status = 'error';
+              launchState.active = null;
+              launchState.error = st.error || st.step || 'Error al iniciar Minecraft Java.';
+              emit(listeners.launchStatus, clone(launchState));
+              return;
+            }
+            if (st.state === 'finished') {
+              window.clearInterval(pollTimer);
+              launchState.status = 'idle';
+              launchState.active = null;
+              launchState.error = null;
+              emit(listeners.launchStatus, clone(launchState));
+              return;
+            }
+            if (st.state === 'running') {
+              launchState.status = 'playing';
+              launchState.active = {
+                versionId: preflight.versionId,
+                mode: preflight.mode,
+                ramMb,
+                javaMajor: reqJavaMajor,
+                pid: st.pid || null
+              };
+              emit(listeners.launchStatus, clone(launchState));
+              if (!shutdownTriggered && store.config.general && store.config.general.closeBehavior === 'quit') {
+                shutdownTriggered = true;
+                window.setTimeout(() => {
+                  fetch('/api/local/shutdown', { method: 'POST' }).catch(() => {});
+                  try { window.close(); } catch { /* ignore */ }
+                }, 1400);
+              }
+              return;
+            }
+            launchState.status = st.state === 'launching' ? 'starting' : 'preparing';
+            emit(listeners.launchStatus, clone(launchState));
+          } catch {
+            // Keep polling while local host runs
+          }
+        }, 750);
+
+        return clone(launchState);
       },
       stop: async () => {
         launchState.active = null;
@@ -1248,15 +1510,23 @@
     }),
     performance: Object.freeze({
       evaluate: async (payload) => {
-        const resp = await fetch('/api/pan/performance-eval', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload || {})
-        });
-        if (!resp.ok) {
-          throw new Error(`Error HTTP ${resp.status}`);
+        try {
+          const resp = await fetch('/api/pan/performance-eval', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload || {})
+          });
+          const ct = resp.headers.get('content-type') || '';
+          if (resp.ok && ct.includes('application/json')) {
+            return resp.json();
+          }
+        } catch {
+          // Local host fallback
         }
-        return resp.json();
+        if (window.Nexus && window.Nexus.perfEngine) {
+          return window.Nexus.perfEngine.evaluateFromConfig(store.config);
+        }
+        throw new Error('Motor de rendimiento no disponible.');
       },
       exportMrpack: async (payload) => {
         const resp = await fetch('/api/mc/export-mrpack', {

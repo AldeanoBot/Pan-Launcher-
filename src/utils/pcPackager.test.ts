@@ -3,10 +3,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  buildUnixLocalServerPy,
   buildUnixSelfContainedSh,
   buildWindowsExe,
   buildWindowsSelfContainedBat,
 } from './pcPackager';
+import { execFileSync } from 'node:child_process';
+import os from 'node:os';
 
 test('buildWindowsExe injects valid .panpkg PE section and recomputes PE CheckSum cleanly', () => {
   const stubPath = path.resolve(process.cwd(), 'native/pan-stub.exe');
@@ -69,6 +72,7 @@ test('buildWindowsSelfContainedBat embeds run.ps1, server.ps1, launch.ps1 and zi
   assert.match(serverPs1, /canLaunchJava":true/);
   assert.match(serverPs1, /api\/local\/launch/);
   assert.match(serverPs1, /api\/local\/status/);
+  assert.match(serverPs1, /api\/local\/shutdown/);
   assert.match(serverPs1, /api\/mc\/ping/);
   assert.match(serverPs1, /api\/pc\/download-app/);
   assert.match(serverPs1, /Start-LaunchWorker/);
@@ -98,12 +102,33 @@ test('buildWindowsSelfContainedBat embeds run.ps1, server.ps1, launch.ps1 and zi
   assert.match(decodedRunPs1, /Pan-launcher\.lnk/);
 });
 
-test('buildUnixSelfContainedSh embeds local http server and zip payload', () => {
+test('buildUnixSelfContainedSh embeds valid Python 3 Minecraft Java backend and bash script', () => {
   const fakeZipB64 = Buffer.from('PK_MOCK_ZIP').toString('base64');
   const sh = buildUnixSelfContainedSh(fakeZipB64, '2.0.1');
 
   assert.match(sh, /^#!\/usr\/bin\/env bash/);
   assert.match(sh, /127\.0\.0\.1/);
+  assert.match(sh, /__PAN_SERVER_PY_B64__/);
   assert.match(sh, /__PAN_ZIP_B64__/);
   assert.ok(sh.includes(fakeZipB64));
+
+  const serverPy = buildUnixLocalServerPy();
+  assert.match(serverPy, /"canLaunchJava": True/);
+  assert.match(serverPy, /api\/local\/launch/);
+  assert.match(serverPy, /api\/local\/status/);
+  assert.match(serverPy, /api\/local\/shutdown/);
+  assert.match(serverPy, /api\.adoptium\.net\/v3\/binary\/latest/);
+  assert.match(serverPy, /UseCompactObjectHeaders/);
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pan-unix-test-'));
+  try {
+    const shFile = path.join(tmpDir, 'Pan-launcher.sh');
+    const pyFile = path.join(tmpDir, 'server.py');
+    fs.writeFileSync(shFile, sh, 'utf8');
+    fs.writeFileSync(pyFile, serverPy, 'utf8');
+    execFileSync('bash', ['-n', shFile]);
+    execFileSync('python3', ['-m', 'py_compile', pyFile]);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
