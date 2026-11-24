@@ -1,0 +1,6 @@
+{
+  "name": "Kryo Client",
+  "description": "Cliente y lanzador de Minecraft de alto rendimiento optimizado para máximo FPS con soporte multijugador, gestión de mods, cuentas offline/Microsoft y exportador de configuración.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

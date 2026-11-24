@@ -1,0 +1,2277 @@
+#define UNICODE
+#define _UNICODE
+#define WIN32_LEAN_AND_MEAN
+
+#include <windows.h>
+#include <winhttp.h>
+#include <bcrypt.h>
+#include <ctype.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
+
+#include "pan_mc.h"
+#include "pan_json.h"
+#include "pan_zip.h"
+
+#ifndef WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
+#define WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY 4
+#endif
+
+#ifndef WINHTTP_OPTION_REDIRECT_POLICY
+#define WINHTTP_OPTION_REDIRECT_POLICY 88
+#define WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS 2
+#endif
+
+#ifndef BCRYPT_SHA1_ALGORITHM
+#define BCRYPT_SHA1_ALGORITHM L"SHA1"
+#endif
+
+#ifndef BCRYPT_MD5_ALGORITHM
+#define BCRYPT_MD5_ALGORITHM L"MD5"
+#endif
+
+/* =========================================================================
+ * Thread-safe Status & Logs
+ * ========================================================================= */
+
+#define MAX_LOG_LINES 80
+#define MAX_LINE_LEN 512
+
+typedef struct {
+  CRITICAL_SECTION cs;
+  int initialized;
+  volatile LONG launching;
+  volatile LONG stop_requested;
+  char state[32];
+  int progress;
+  char step[512];
+  char error[2048];
+  DWORD pid;
+  char mc_version[64];
+  char instance_dir[1024];
+  char logs[MAX_LOG_LINES][MAX_LINE_LEN];
+  int log_count;
+  wchar_t base_dir[MAX_PATH];
+  HANDLE worker_thread;
+  char* pending_req_json;
+  size_t pending_req_len;
+} PanMcEngine;
+
+static PanMcEngine g_mc = {0};
+
+static void sanitize_json_str(const char* src, char* dst, size_t cap) {
+  if (!dst || cap == 0) return;
+  if (!src) {
+    dst[0] = '\0';
+    return;
+  }
+  size_t j = 0;
+  for (size_t i = 0; src[i] && j + 8 < cap; i++) {
+    unsigned char c = (unsigned char)src[i];
+    if (c == '"' || c == '\\') {
+      dst[j++] = '\\';
+      dst[j++] = (char)c;
+    } else if (c == '\n') {
+      dst[j++] = '\\';
+      dst[j++] = 'n';
+    } else if (c == '\r') {
+      /* skip */
+    } else if (c == '\t') {
+      dst[j++] = ' ';
+    } else if (c < 0x20) {
+      dst[j++] = ' ';
+    } else {
+      dst[j++] = (char)c;
+    }
+  }
+  dst[j] = '\0';
+}
+
+static void append_log_locked(const char* line) {
+  if (!line || !line[0]) return;
+  SYSTEMTIME st;
+  GetLocalTime(&st);
+  char formatted[MAX_LINE_LEN];
+  _snprintf(formatted, sizeof(formatted), "[%02d:%02d:%02d] %s",
+            (int)st.wHour, (int)st.wMinute, (int)st.wSecond, line);
+  formatted[sizeof(formatted) - 1] = '\0';
+
+  if (g_mc.log_count >= MAX_LOG_LINES) {
+    memmove(g_mc.logs[0], g_mc.logs[1], (MAX_LOG_LINES - 1) * MAX_LINE_LEN);
+    g_mc.log_count = MAX_LOG_LINES - 1;
+  }
+  strncpy(g_mc.logs[g_mc.log_count], formatted, MAX_LINE_LEN - 1);
+  g_mc.logs[g_mc.log_count][MAX_LINE_LEN - 1] = '\0';
+  g_mc.log_count++;
+}
+
+static void set_pan_status(
+    const char* state,
+    int progress,
+    const char* step,
+    const char* err_msg,
+    DWORD proc_id,
+    const char* mc_ver,
+    const char* inst_dir) {
+  EnterCriticalSection(&g_mc.cs);
+  strncpy(g_mc.state, state ? state : "idle", sizeof(g_mc.state) - 1);
+  g_mc.state[sizeof(g_mc.state) - 1] = '\0';
+  g_mc.progress = progress;
+  if (step) {
+    strncpy(g_mc.step, step, sizeof(g_mc.step) - 1);
+    g_mc.step[sizeof(g_mc.step) - 1] = '\0';
+    append_log_locked(step);
+  }
+  if (err_msg && err_msg[0]) {
+    strncpy(g_mc.error, err_msg, sizeof(g_mc.error) - 1);
+    g_mc.error[sizeof(g_mc.error) - 1] = '\0';
+    char eline[MAX_LINE_LEN];
+    _snprintf(eline, sizeof(eline), "ERROR: %.480s", err_msg);
+    eline[sizeof(eline) - 1] = '\0';
+    append_log_locked(eline);
+  } else if (err_msg) {
+    g_mc.error[0] = '\0';
+  }
+  g_mc.pid = proc_id;
+  if (mc_ver) {
+    strncpy(g_mc.mc_version, mc_ver, sizeof(g_mc.mc_version) - 1);
+    g_mc.mc_version[sizeof(g_mc.mc_version) - 1] = '\0';
+  }
+  if (inst_dir) {
+    strncpy(g_mc.instance_dir, inst_dir, sizeof(g_mc.instance_dir) - 1);
+    g_mc.instance_dir[sizeof(g_mc.instance_dir) - 1] = '\0';
+  }
+  LeaveCriticalSection(&g_mc.cs);
+}
+
+static void set_pan_statusf(const char* state, int progress, const char* fmt, ...) {
+  char buf[512];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  buf[sizeof(buf) - 1] = '\0';
+  set_pan_status(state, progress, buf, NULL, 0, NULL, NULL);
+}
+
+void pan_mc_init(const wchar_t* base_dir) {
+  if (!g_mc.initialized) {
+    InitializeCriticalSection(&g_mc.cs);
+    g_mc.initialized = 1;
+    strcpy(g_mc.state, "idle");
+  }
+  if (base_dir) {
+    wcsncpy(g_mc.base_dir, base_dir, MAX_PATH - 1);
+    g_mc.base_dir[MAX_PATH - 1] = L'\0';
+  }
+}
+
+void pan_mc_get_status_json(char* out_buf, size_t out_cap) {
+  if (!out_buf || out_cap == 0) return;
+  if (!g_mc.initialized) {
+    strncpy(out_buf, "{\"state\":\"idle\",\"progress\":0,\"step\":\"\",\"error\":null,\"pid\":null,\"logs\":[]}", out_cap - 1);
+    out_buf[out_cap - 1] = '\0';
+    return;
+  }
+
+  EnterCriticalSection(&g_mc.cs);
+  char s_step[1024], s_err[4096], s_ver[128], s_inst[2048];
+  sanitize_json_str(g_mc.step, s_step, sizeof(s_step));
+  sanitize_json_str(g_mc.error, s_err, sizeof(s_err));
+  sanitize_json_str(g_mc.mc_version, s_ver, sizeof(s_ver));
+  sanitize_json_str(g_mc.instance_dir, s_inst, sizeof(s_inst));
+
+  size_t pos = 0;
+  int n = _snprintf(
+      out_buf + pos, out_cap - pos,
+      "{\"state\":\"%s\",\"progress\":%d,\"step\":\"%s\",\"error\":%s%s%s,\"pid\":",
+      g_mc.state, g_mc.progress, s_step,
+      g_mc.error[0] ? "\"" : "null",
+      g_mc.error[0] ? s_err : "",
+      g_mc.error[0] ? "\"" : "");
+  if (n > 0) pos += (size_t)n;
+
+  if (g_mc.pid > 0 && pos + 32 < out_cap) {
+    n = _snprintf(out_buf + pos, out_cap - pos, "%lu", (unsigned long)g_mc.pid);
+  } else if (pos + 16 < out_cap) {
+    n = _snprintf(out_buf + pos, out_cap - pos, "null");
+  } else {
+    n = 0;
+  }
+  if (n > 0) pos += (size_t)n;
+
+  if (pos + 256 < out_cap) {
+    n = _snprintf(out_buf + pos, out_cap - pos,
+                  ",\"mcVersion\":\"%s\",\"instanceDir\":\"%s\",\"logs\":[",
+                  s_ver, s_inst);
+    if (n > 0) pos += (size_t)n;
+  }
+
+  for (int i = 0; i < g_mc.log_count && pos + 64 < out_cap; i++) {
+    char sl[1024];
+    sanitize_json_str(g_mc.logs[i], sl, sizeof(sl));
+    if (pos + strlen(sl) + 16 >= out_cap) break;
+    n = _snprintf(out_buf + pos, out_cap - pos, "%s\"%s\"", (i > 0 ? "," : ""), sl);
+    if (n > 0) pos += (size_t)n;
+  }
+
+  if (pos + 4 < out_cap) {
+    out_buf[pos++] = ']';
+    out_buf[pos++] = '}';
+    out_buf[pos] = '\0';
+  } else {
+    out_buf[out_cap - 1] = '\0';
+  }
+  LeaveCriticalSection(&g_mc.cs);
+}
+
+/* =========================================================================
+ * String / UTF-8 / Path Helpers
+ * ========================================================================= */
+
+static char* xstrdup(const char* s) {
+  if (!s) return NULL;
+  size_t len = strlen(s);
+  char* p = (char*)malloc(len + 1);
+  if (p) memcpy(p, s, len + 1);
+  return p;
+}
+
+static int utf8_to_wide(const char* s, wchar_t* w, size_t wcap) {
+  if (!s || !w || wcap == 0) return 0;
+  int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, w, (int)wcap);
+  if (n <= 0) {
+    w[0] = L'\0';
+    return 0;
+  }
+  return 1;
+}
+
+static int wide_to_utf8(const wchar_t* w, char* s, size_t scap) {
+  if (!w || !s || scap == 0) return 0;
+  int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, s, (int)scap, NULL, NULL);
+  if (n <= 0) {
+    s[0] = '\0';
+    return 0;
+  }
+  return 1;
+}
+
+static void ensure_dir_w(const wchar_t* dir_path) {
+  wchar_t tmp[MAX_PATH];
+  wcsncpy(tmp, dir_path, MAX_PATH - 1);
+  tmp[MAX_PATH - 1] = L'\0';
+  for (wchar_t* p = tmp; *p; p++) {
+    if (*p == L'\\' || *p == L'/') {
+      *p = L'\\';
+      if (p - tmp >= 2 && *(p - 1) != L':') {
+        *p = L'\0';
+        CreateDirectoryW(tmp, NULL);
+        *p = L'\\';
+      }
+    }
+  }
+  CreateDirectoryW(tmp, NULL);
+}
+
+static void ensure_parent_dir_w(const wchar_t* file_path) {
+  wchar_t dir[MAX_PATH];
+  wcsncpy(dir, file_path, MAX_PATH - 1);
+  dir[MAX_PATH - 1] = L'\0';
+  wchar_t* sep = wcsrchr(dir, L'\\');
+  if (!sep) sep = wcsrchr(dir, L'/');
+  if (sep) {
+    *sep = L'\0';
+    ensure_dir_w(dir);
+  }
+}
+
+static int file_exists_nonempty_w(const wchar_t* path) {
+  WIN32_FILE_ATTRIBUTE_DATA fad;
+  if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fad)) return 0;
+  if (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return 0;
+  return (fad.nFileSizeHigh > 0 || fad.nFileSizeLow > 0);
+}
+
+static uint8_t* read_entire_file_w(const wchar_t* path, size_t* out_len) {
+  HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                         NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (h == INVALID_HANDLE_VALUE) return NULL;
+  LARGE_INTEGER fs;
+  if (!GetFileSizeEx(h, &fs) || fs.QuadPart < 0 || fs.QuadPart > 256LL * 1024LL * 1024LL) {
+    CloseHandle(h);
+    return NULL;
+  }
+  size_t sz = (size_t)fs.QuadPart;
+  uint8_t* buf = (uint8_t*)malloc(sz + 1);
+  if (!buf) {
+    CloseHandle(h);
+    return NULL;
+  }
+  size_t done = 0;
+  while (done < sz) {
+    DWORD chunk = (sz - done) > 65536 ? 65536 : (DWORD)(sz - done);
+    DWORD rd = 0;
+    if (!ReadFile(h, buf + done, chunk, &rd, NULL) || rd == 0) {
+      free(buf);
+      CloseHandle(h);
+      return NULL;
+    }
+    done += rd;
+  }
+  CloseHandle(h);
+  buf[sz] = '\0';
+  if (out_len) *out_len = sz;
+  return buf;
+}
+
+static int write_entire_file_w(const wchar_t* path, const void* data, size_t len) {
+  ensure_parent_dir_w(path);
+  HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (h == INVALID_HANDLE_VALUE) return 0;
+  const uint8_t* ptr = (const uint8_t*)data;
+  size_t done = 0;
+  while (done < len) {
+    DWORD chunk = (len - done) > 65536 ? 65536 : (DWORD)(len - done);
+    DWORD wr = 0;
+    if (!WriteFile(h, ptr + done, chunk, &wr, NULL) || wr != chunk) {
+      CloseHandle(h);
+      return 0;
+    }
+    done += wr;
+  }
+  CloseHandle(h);
+  return 1;
+}
+
+/* =========================================================================
+ * BCrypt SHA-1 & MD5
+ * ========================================================================= */
+
+static int compute_file_sha1_hex(const wchar_t* path, char out_hex[41]) {
+  size_t len = 0;
+  uint8_t* buf = read_entire_file_w(path, &len);
+  if (!buf) return 0;
+
+  BCRYPT_ALG_HANDLE hAlg = NULL;
+  BCRYPT_HASH_HANDLE hHash = NULL;
+  uint8_t digest[20];
+  int ok = 0;
+
+  if (BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA1_ALGORITHM, NULL, 0) == 0) {
+    if (BCryptCreateHash(hAlg, &hHash, NULL, 0, NULL, 0, 0) == 0) {
+      if (BCryptHashData(hHash, buf, (ULONG)len, 0) == 0 &&
+          BCryptFinishHash(hHash, digest, sizeof(digest), 0) == 0) {
+        static const char hex[] = "0123456789abcdef";
+        for (int i = 0; i < 20; i++) {
+          out_hex[i * 2] = hex[(digest[i] >> 4) & 0xF];
+          out_hex[i * 2 + 1] = hex[digest[i] & 0xF];
+        }
+        out_hex[40] = '\0';
+        ok = 1;
+      }
+      BCryptDestroyHash(hHash);
+    }
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+  }
+  free(buf);
+  return ok;
+}
+
+static void compute_offline_uuid(const char* username, char out_hex[33]) {
+  char input[256];
+  _snprintf(input, sizeof(input), "OfflinePlayer:%s", username && username[0] ? username : "PanWarrior");
+  input[sizeof(input) - 1] = '\0';
+
+  uint8_t digest[16] = {0};
+  BCRYPT_ALG_HANDLE hAlg = NULL;
+  BCRYPT_HASH_HANDLE hHash = NULL;
+  if (BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_MD5_ALGORITHM, NULL, 0) == 0) {
+    if (BCryptCreateHash(hAlg, &hHash, NULL, 0, NULL, 0, 0) == 0) {
+      if (BCryptHashData(hHash, (PUCHAR)input, (ULONG)strlen(input), 0) == 0) {
+        BCryptFinishHash(hHash, digest, sizeof(digest), 0);
+      }
+      BCryptDestroyHash(hHash);
+    }
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+  }
+  digest[6] = (uint8_t)((digest[6] & 0x0Fu) | 0x30u);
+  digest[8] = (uint8_t)((digest[8] & 0x3Fu) | 0x80u);
+  static const char hex[] = "0123456789abcdef";
+  for (int i = 0; i < 16; i++) {
+    out_hex[i * 2] = hex[(digest[i] >> 4) & 0xF];
+    out_hex[i * 2 + 1] = hex[digest[i] & 0xF];
+  }
+  out_hex[32] = '\0';
+}
+
+/* =========================================================================
+ * WinHTTP Client (Redirects + Streaming to File / Memory)
+ * ========================================================================= */
+
+static HINTERNET create_winhttp_session(void) {
+  HINTERNET h = WinHttpOpen(L"PanLauncher/2.3 (Windows)", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+  if (!h) {
+    h = WinHttpOpen(L"PanLauncher/2.3 (Windows)", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+  }
+  if (h) {
+    WinHttpSetTimeouts(h, 8000, 12000, 15000, 60000);
+  }
+  return h;
+}
+
+static int http_fetch_once(
+    HINTERNET hSession,
+    const char* url_utf8,
+    const wchar_t* dest_file,
+    char** out_mem,
+    size_t* out_mem_len,
+    char* err_buf,
+    size_t err_cap) {
+  wchar_t wurl[2048];
+  if (!utf8_to_wide(url_utf8, wurl, 2048)) {
+    if (err_buf) _snprintf(err_buf, err_cap, "URL inválida");
+    return 0;
+  }
+
+  wchar_t host[256] = {0};
+  wchar_t path_buf[1792] = {0};
+  wchar_t extra[512] = {0};
+  URL_COMPONENTS uc;
+  ZeroMemory(&uc, sizeof(uc));
+  uc.dwStructSize = sizeof(uc);
+  uc.lpszHostName = host;
+  uc.dwHostNameLength = 256;
+  uc.lpszUrlPath = path_buf;
+  uc.dwUrlPathLength = 1500;
+  uc.lpszExtraInfo = extra;
+  uc.dwExtraInfoLength = 512;
+
+  if (!WinHttpCrackUrl(wurl, 0, 0, &uc)) {
+    if (err_buf) _snprintf(err_buf, err_cap, "No se pudo analizar URL (%lu)", GetLastError());
+    return 0;
+  }
+
+  wchar_t full_path[2048];
+  _snwprintf(full_path, 2048, L"%ls%ls", path_buf[0] ? path_buf : L"/", extra);
+  full_path[2047] = L'\0';
+
+  HINTERNET hConnect = WinHttpConnect(hSession, host, uc.nPort, 0);
+  if (!hConnect) {
+    if (err_buf) _snprintf(err_buf, err_cap, "Error conectando al servidor (%lu)", GetLastError());
+    return 0;
+  }
+
+  DWORD flags = (uc.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
+  HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", full_path, NULL,
+                                          WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+  if (!hRequest) {
+    WinHttpCloseHandle(hConnect);
+    if (err_buf) _snprintf(err_buf, err_cap, "Error creando petición HTTP (%lu)", GetLastError());
+    return 0;
+  }
+
+  DWORD redir = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+  WinHttpSetOption(hRequest, WINHTTP_OPTION_REDIRECT_POLICY, &redir, sizeof(redir));
+
+  if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+      !WinHttpReceiveResponse(hRequest, NULL)) {
+    DWORD le = GetLastError();
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    if (err_buf) _snprintf(err_buf, err_cap, "Sin respuesta de red (%lu)", le);
+    return 0;
+  }
+
+  DWORD status_code = 0;
+  DWORD sc_len = sizeof(status_code);
+  WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                      WINHTTP_HEADER_NAME_BY_INDEX, &status_code, &sc_len, WINHTTP_NO_HEADER_INDEX);
+  if (status_code < 200 || status_code >= 300) {
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    if (err_buf) _snprintf(err_buf, err_cap, "HTTP %lu", (unsigned long)status_code);
+    return 0;
+  }
+
+  HANDLE hFile = INVALID_HANDLE_VALUE;
+  wchar_t tmp_path[MAX_PATH] = {0};
+  if (dest_file) {
+    ensure_parent_dir_w(dest_file);
+    _snwprintf(tmp_path, MAX_PATH, L"%ls.tmp.%lu", dest_file, (unsigned long)GetCurrentThreadId());
+    tmp_path[MAX_PATH - 1] = L'\0';
+    hFile = CreateFileW(tmp_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+      WinHttpCloseHandle(hRequest);
+      WinHttpCloseHandle(hConnect);
+      if (err_buf) _snprintf(err_buf, err_cap, "No se pudo crear archivo en disco (%lu)", GetLastError());
+      return 0;
+    }
+  }
+
+  char* mem_buf = NULL;
+  size_t mem_len = 0;
+  size_t mem_cap = 0;
+  if (!dest_file) {
+    mem_cap = 8192;
+    mem_buf = (char*)malloc(mem_cap);
+  }
+
+  uint8_t chunk[32768];
+  int ok = 1;
+  for (;;) {
+    DWORD avail = 0;
+    if (!WinHttpQueryDataAvailable(hRequest, &avail)) {
+      ok = 0;
+      break;
+    }
+    if (avail == 0) break;
+
+    while (avail > 0) {
+      DWORD to_read = avail > sizeof(chunk) ? (DWORD)sizeof(chunk) : avail;
+      DWORD rd = 0;
+      if (!WinHttpReadData(hRequest, chunk, to_read, &rd)) {
+        ok = 0;
+        break;
+      }
+      if (rd == 0) break;
+      avail -= rd;
+
+      if (hFile != INVALID_HANDLE_VALUE) {
+        DWORD wr = 0;
+        if (!WriteFile(hFile, chunk, rd, &wr, NULL) || wr != rd) {
+          ok = 0;
+          break;
+        }
+      } else {
+        if (mem_len + rd + 1 > mem_cap) {
+          size_t ncap = mem_cap * 2;
+          while (ncap < mem_len + rd + 1) ncap *= 2;
+          if (ncap > 64u * 1024u * 1024u) {
+            ok = 0;
+            break;
+          }
+          char* nb = (char*)realloc(mem_buf, ncap);
+          if (!nb) {
+            ok = 0;
+            break;
+          }
+          mem_buf = nb;
+          mem_cap = ncap;
+        }
+        memcpy(mem_buf + mem_len, chunk, rd);
+        mem_len += rd;
+      }
+    }
+    if (!ok) break;
+  }
+
+  WinHttpCloseHandle(hRequest);
+  WinHttpCloseHandle(hConnect);
+
+  if (hFile != INVALID_HANDLE_VALUE) {
+    CloseHandle(hFile);
+    if (ok) {
+      if (!MoveFileExW(tmp_path, dest_file, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(tmp_path);
+        if (err_buf) _snprintf(err_buf, err_cap, "Error moviendo archivo descargado (%lu)", GetLastError());
+        return 0;
+      }
+    } else {
+      DeleteFileW(tmp_path);
+      if (err_buf) _snprintf(err_buf, err_cap, "Descarga interrumpida");
+      return 0;
+    }
+    return 1;
+  }
+
+  if (!ok || !mem_buf) {
+    free(mem_buf);
+    if (err_buf) _snprintf(err_buf, err_cap, "Error leyendo respuesta HTTP");
+    return 0;
+  }
+  mem_buf[mem_len] = '\0';
+  *out_mem = mem_buf;
+  *out_mem_len = mem_len;
+  return 1;
+}
+
+static int http_download_file(
+    HINTERNET hSession,
+    const char* url,
+    const wchar_t* dest_file,
+    const char* expected_sha1,
+    char* err_buf,
+    size_t err_cap) {
+  if (file_exists_nonempty_w(dest_file)) {
+    if (!expected_sha1 || !expected_sha1[0]) return 1;
+    char actual[41];
+    if (compute_file_sha1_hex(dest_file, actual) && _stricmp(actual, expected_sha1) == 0) {
+      return 1;
+    }
+  }
+
+  for (int attempt = 1; attempt <= 2; attempt++) {
+    char local_err[256] = {0};
+    if (http_fetch_once(hSession, url, dest_file, NULL, NULL, local_err, sizeof(local_err))) {
+      return 1;
+    }
+    if (attempt == 2 && err_buf) {
+      _snprintf(err_buf, err_cap, "Error descargando %s: %s", url, local_err);
+    }
+    Sleep(300);
+  }
+  return 0;
+}
+
+static PanJsonValue* http_get_json(
+    HINTERNET hSession,
+    const char* url,
+    char* err_buf,
+    size_t err_cap) {
+  for (int attempt = 1; attempt <= 2; attempt++) {
+    char* mem = NULL;
+    size_t mlen = 0;
+    char local_err[256] = {0};
+    if (http_fetch_once(hSession, url, NULL, &mem, &mlen, local_err, sizeof(local_err))) {
+      PanJsonValue* v = pan_json_parse(mem, mlen);
+      free(mem);
+      if (v) return v;
+      if (err_buf) _snprintf(err_buf, err_cap, "JSON inválido desde %s", url);
+      return NULL;
+    }
+    if (attempt == 2 && err_buf) {
+      _snprintf(err_buf, err_cap, "Error consultando %s: %s", url, local_err);
+    }
+    Sleep(300);
+  }
+  return NULL;
+}
+
+/* =========================================================================
+ * Dynamic Collections & Zip Native DLL Extractor
+ * ========================================================================= */
+
+typedef struct {
+  char** items;
+  size_t count;
+  size_t cap;
+} PanStrList;
+
+static void strlist_add(PanStrList* l, const char* s) {
+  if (!s) return;
+  if (l->count >= l->cap) {
+    size_t ncap = l->cap ? l->cap * 2 : 16;
+    char** ni = (char**)realloc(l->items, ncap * sizeof(char*));
+    if (!ni) return;
+    l->items = ni;
+    l->cap = ncap;
+  }
+  l->items[l->count++] = xstrdup(s);
+}
+
+static int strlist_contains(const PanStrList* l, const char* s) {
+  if (!s) return 0;
+  for (size_t i = 0; i < l->count; i++) {
+    if (strcmp(l->items[i], s) == 0) return 1;
+  }
+  return 0;
+}
+
+static void strlist_free(PanStrList* l) {
+  for (size_t i = 0; i < l->count; i++) free(l->items[i]);
+  free(l->items);
+  l->items = NULL;
+  l->count = 0;
+  l->cap = 0;
+}
+
+typedef struct {
+  char* key;
+  wchar_t* val;
+} PanCpEntry;
+
+typedef struct {
+  PanCpEntry* items;
+  size_t count;
+  size_t cap;
+} PanCpMap;
+
+static void cpmap_set(PanCpMap* m, const char* key, const wchar_t* val) {
+  for (size_t i = 0; i < m->count; i++) {
+    if (strcmp(m->items[i].key, key) == 0) {
+      free(m->items[i].val);
+      m->items[i].val = _wcsdup(val);
+      return;
+    }
+  }
+  if (m->count >= m->cap) {
+    size_t ncap = m->cap ? m->cap * 2 : 64;
+    PanCpEntry* ni = (PanCpEntry*)realloc(m->items, ncap * sizeof(PanCpEntry));
+    if (!ni) return;
+    m->items = ni;
+    m->cap = ncap;
+  }
+  m->items[m->count].key = xstrdup(key);
+  m->items[m->count].val = _wcsdup(val);
+  m->count++;
+}
+
+static void cpmap_free(PanCpMap* m) {
+  for (size_t i = 0; i < m->count; i++) {
+    free(m->items[i].key);
+    free(m->items[i].val);
+  }
+  free(m->items);
+  m->items = NULL;
+  m->count = 0;
+  m->cap = 0;
+}
+
+static int extract_full_zip_cb(
+    const char* name,
+    const uint8_t* data,
+    size_t data_len,
+    size_t idx,
+    size_t total,
+    void* user) {
+  (void)idx;
+  (void)total;
+  const wchar_t* target_dir = (const wchar_t*)user;
+  wchar_t wrel[512];
+  if (!utf8_to_wide(name, wrel, 512)) return 0;
+  for (int i = 0; wrel[i]; i++) {
+    if (wrel[i] == L'/') wrel[i] = L'\\';
+  }
+  wchar_t dest[MAX_PATH];
+  if (_snwprintf(dest, MAX_PATH, L"%ls\\%ls", target_dir, wrel) >= MAX_PATH) return 0;
+  dest[MAX_PATH - 1] = L'\0';
+  return write_entire_file_w(dest, data, data_len);
+}
+
+static int extract_native_dll_cb(
+    const char* name,
+    const uint8_t* data,
+    size_t data_len,
+    size_t idx,
+    size_t total,
+    void* user) {
+  (void)idx;
+  (void)total;
+  const wchar_t* natives_dir = (const wchar_t*)user;
+  size_t nlen = strlen(name);
+  int is_dll = (nlen > 4 && _stricmp(name + nlen - 4, ".dll") == 0);
+  int is_so = (nlen > 3 && _stricmp(name + nlen - 3, ".so") == 0);
+  if (!is_dll && !is_so) return 1;
+
+  const char* base = strrchr(name, '/');
+  base = base ? base + 1 : name;
+  if (!base[0]) return 1;
+
+  wchar_t wbase[256];
+  if (!utf8_to_wide(base, wbase, 256)) return 1;
+  wchar_t dest[MAX_PATH];
+  _snwprintf(dest, MAX_PATH, L"%ls\\%ls", natives_dir, wbase);
+  dest[MAX_PATH - 1] = L'\0';
+  if (file_exists_nonempty_w(dest)) return 1;
+  return write_entire_file_w(dest, data, data_len);
+}
+
+static void extract_native_jar_dlls(const wchar_t* jar_path, const wchar_t* natives_dir) {
+  size_t len = 0;
+  uint8_t* buf = read_entire_file_w(jar_path, &len);
+  if (!buf) return;
+  pan_zip_extract_memory(buf, len, extract_native_dll_cb, (void*)natives_dir);
+  free(buf);
+}
+
+static int find_javaw_recursive(const wchar_t* dir, wchar_t* out_path, size_t cap) {
+  wchar_t pattern[MAX_PATH];
+  _snwprintf(pattern, MAX_PATH, L"%ls\\*", dir);
+  pattern[MAX_PATH - 1] = L'\0';
+
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW(pattern, &fd);
+  if (h == INVALID_HANDLE_VALUE) return 0;
+
+  int found = 0;
+  do {
+    if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+    wchar_t full[MAX_PATH];
+    _snwprintf(full, MAX_PATH, L"%ls\\%ls", dir, fd.cFileName);
+    full[MAX_PATH - 1] = L'\0';
+    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+      if (find_javaw_recursive(full, out_path, cap)) {
+        found = 1;
+        break;
+      }
+    } else if (_wcsicmp(fd.cFileName, L"javaw.exe") == 0) {
+      wcsncpy(out_path, full, cap - 1);
+      out_path[cap - 1] = L'\0';
+      found = 1;
+      break;
+    }
+  } while (FindNextFileW(h, &fd));
+
+  FindClose(h);
+  return found;
+}
+
+static int parse_java_major_from_text(const char* txt) {
+  if (!txt) return 0;
+  const char* p = strstr(txt, "version \"");
+  if (!p) return 0;
+  p += 9;
+  int first = atoi(p);
+  if (first == 1) {
+    const char* dot = strchr(p, '.');
+    if (dot) return atoi(dot + 1);
+  }
+  return first;
+}
+
+static int probe_java_major(const wchar_t* exe_path) {
+  if (!exe_path || !file_exists_nonempty_w(exe_path)) return 0;
+  wchar_t probe_exe[MAX_PATH];
+  wcsncpy(probe_exe, exe_path, MAX_PATH - 1);
+  probe_exe[MAX_PATH - 1] = L'\0';
+  size_t len = wcslen(probe_exe);
+  if (len >= 9 && _wcsicmp(probe_exe + len - 9, L"javaw.exe") == 0) {
+    wchar_t java_sibling[MAX_PATH];
+    wcsncpy(java_sibling, probe_exe, MAX_PATH - 1);
+    java_sibling[MAX_PATH - 1] = L'\0';
+    wcscpy(java_sibling + len - 9, L"java.exe");
+    if (file_exists_nonempty_w(java_sibling)) {
+      wcscpy(probe_exe, java_sibling);
+    }
+  }
+
+  SECURITY_ATTRIBUTES sa;
+  ZeroMemory(&sa, sizeof(sa));
+  sa.nLength = sizeof(sa);
+  sa.bInheritHandle = TRUE;
+
+  HANDLE hRead = NULL, hWrite = NULL;
+  if (!CreatePipe(&hRead, &hWrite, &sa, 0)) return 0;
+  SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+
+  STARTUPINFOW si;
+  PROCESS_INFORMATION pi;
+  ZeroMemory(&si, sizeof(si));
+  ZeroMemory(&pi, sizeof(pi));
+  si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdOutput = hWrite;
+  si.hStdError = hWrite;
+  si.hStdInput = INVALID_HANDLE_VALUE;
+
+  wchar_t cmd[MAX_PATH + 32];
+  _snwprintf(cmd, MAX_PATH + 32, L"\"%ls\" -version", probe_exe);
+  cmd[MAX_PATH + 31] = L'\0';
+
+  int major = 0;
+  if (CreateProcessW(probe_exe, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+    CloseHandle(hWrite);
+    hWrite = INVALID_HANDLE_VALUE;
+    char out[2048];
+    DWORD total = 0, rd = 0;
+    WaitForSingleObject(pi.hProcess, 3000);
+    while (total + 1 < sizeof(out) && ReadFile(hRead, out + total, (DWORD)(sizeof(out) - 1 - total), &rd, NULL) && rd > 0) {
+      total += rd;
+    }
+    out[total] = '\0';
+    major = parse_java_major_from_text(out);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+  }
+  if (hWrite != INVALID_HANDLE_VALUE && hWrite != NULL) CloseHandle(hWrite);
+  if (hRead != NULL) CloseHandle(hRead);
+  return major;
+}
+
+static int find_matching_javaw_in_tree(const wchar_t* dir, int min_major, int depth, wchar_t* out_path, size_t cap) {
+  if (!dir || !dir[0] || depth > 4) return 0;
+  wchar_t direct[MAX_PATH];
+  _snwprintf(direct, MAX_PATH, L"%ls\\bin\\javaw.exe", dir);
+  direct[MAX_PATH - 1] = L'\0';
+  if (file_exists_nonempty_w(direct)) {
+    int m = probe_java_major(direct);
+    if (m >= min_major) {
+      wcsncpy(out_path, direct, cap - 1);
+      out_path[cap - 1] = L'\0';
+      return 1;
+    }
+  }
+  _snwprintf(direct, MAX_PATH, L"%ls\\javaw.exe", dir);
+  direct[MAX_PATH - 1] = L'\0';
+  if (file_exists_nonempty_w(direct)) {
+    int m = probe_java_major(direct);
+    if (m >= min_major) {
+      wcsncpy(out_path, direct, cap - 1);
+      out_path[cap - 1] = L'\0';
+      return 1;
+    }
+  }
+
+  wchar_t pattern[MAX_PATH];
+  _snwprintf(pattern, MAX_PATH, L"%ls\\*", dir);
+  pattern[MAX_PATH - 1] = L'\0';
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW(pattern, &fd);
+  if (h == INVALID_HANDLE_VALUE) return 0;
+  int found = 0;
+  do {
+    if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+    if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+    wchar_t sub[MAX_PATH];
+    _snwprintf(sub, MAX_PATH, L"%ls\\%ls", dir, fd.cFileName);
+    sub[MAX_PATH - 1] = L'\0';
+    if (find_matching_javaw_in_tree(sub, min_major, depth + 1, out_path, cap)) {
+      found = 1;
+      break;
+    }
+  } while (FindNextFileW(h, &fd));
+  FindClose(h);
+  return found;
+}
+
+static int find_system_javaw(int min_major, const char* custom_path_utf8, wchar_t* out_path, size_t cap) {
+  if (custom_path_utf8 && custom_path_utf8[0]) {
+    wchar_t wcustom[MAX_PATH];
+    if (utf8_to_wide(custom_path_utf8, wcustom, MAX_PATH) && file_exists_nonempty_w(wcustom)) {
+      int m = probe_java_major(wcustom);
+      if (m >= min_major || m == 0) {
+        wcsncpy(out_path, wcustom, cap - 1);
+        out_path[cap - 1] = L'\0';
+        return 1;
+      }
+    }
+  }
+
+  wchar_t env_val[MAX_PATH] = {0};
+  if (GetEnvironmentVariableW(L"JAVA_HOME", env_val, MAX_PATH) > 0) {
+    if (find_matching_javaw_in_tree(env_val, min_major, 0, out_path, cap)) return 1;
+  }
+
+  const wchar_t* roots[2] = {NULL, NULL};
+  wchar_t pf[MAX_PATH] = {0}, pf86[MAX_PATH] = {0};
+  if (GetEnvironmentVariableW(L"ProgramFiles", pf, MAX_PATH) > 0) roots[0] = pf;
+  if (GetEnvironmentVariableW(L"ProgramFiles(x86)", pf86, MAX_PATH) > 0) roots[1] = pf86;
+
+  static const wchar_t* VENDORS[] = {
+    L"Eclipse Adoptium",
+    L"Java",
+    L"Microsoft",
+    L"Zulu",
+    L"BellSoft",
+    L"Amazon Corretto",
+    L"SapMachine",
+    NULL
+  };
+  for (int r = 0; r < 2; r++) {
+    if (!roots[r]) continue;
+    for (int v = 0; VENDORS[v]; v++) {
+      wchar_t vdir[MAX_PATH];
+      _snwprintf(vdir, MAX_PATH, L"%ls\\%ls", roots[r], VENDORS[v]);
+      vdir[MAX_PATH - 1] = L'\0';
+      if (find_matching_javaw_in_tree(vdir, min_major, 0, out_path, cap)) return 1;
+    }
+  }
+
+  wchar_t localapp[MAX_PATH] = {0}, appdata[MAX_PATH] = {0};
+  if (GetEnvironmentVariableW(L"LOCALAPPDATA", localapp, MAX_PATH) > 0) {
+    wchar_t ad_dir[MAX_PATH];
+    _snwprintf(ad_dir, MAX_PATH, L"%ls\\Programs\\Eclipse Adoptium", localapp);
+    ad_dir[MAX_PATH - 1] = L'\0';
+    if (find_matching_javaw_in_tree(ad_dir, min_major, 0, out_path, cap)) return 1;
+  }
+  if (GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH) > 0) {
+    wchar_t mc_rt[MAX_PATH];
+    _snwprintf(mc_rt, MAX_PATH, L"%ls\\.minecraft\\runtime", appdata);
+    mc_rt[MAX_PATH - 1] = L'\0';
+    if (find_matching_javaw_in_tree(mc_rt, min_major, 0, out_path, cap)) return 1;
+  }
+
+  wchar_t path_hit[MAX_PATH] = {0};
+  if (SearchPathW(NULL, L"javaw.exe", NULL, MAX_PATH, path_hit, NULL) > 0) {
+    int m = probe_java_major(path_hit);
+    if (m >= min_major) {
+      wcsncpy(out_path, path_hit, cap - 1);
+      out_path[cap - 1] = L'\0';
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* =========================================================================
+ * Mojang Rules & Maven Coordinates
+ * ========================================================================= */
+
+static int test_mojang_rules(const PanJsonValue* rules) {
+  if (!rules || rules->type != PAN_JSON_ARRAY || rules->u.arr.count == 0) return 1;
+  int allowed = 0;
+  for (size_t i = 0; i < rules->u.arr.count; i++) {
+    const PanJsonValue* rule = rules->u.arr.items[i];
+    if (pan_json_get(rule, "features")) continue;
+    int os_match = 1;
+    const PanJsonValue* os_obj = pan_json_get(rule, "os");
+    if (os_obj && os_obj->type == PAN_JSON_OBJECT) {
+      const char* os_name = pan_json_str(pan_json_get(os_obj, "name"), NULL);
+      const char* os_arch = pan_json_str(pan_json_get(os_obj, "arch"), NULL);
+      if (os_name && strcmp(os_name, "windows") != 0) os_match = 0;
+      if (os_arch && strcmp(os_arch, "x86_64") != 0 && strcmp(os_arch, "amd64") != 0) os_match = 0;
+    }
+    if (os_match) {
+      const char* action = pan_json_str(pan_json_get(rule, "action"), "");
+      allowed = (strcmp(action, "allow") == 0);
+    }
+  }
+  return allowed;
+}
+
+static void split_ga_key(const char* maven_name, char* out_ga, size_t cap) {
+  const char* c1 = strchr(maven_name, ':');
+  if (!c1) {
+    strncpy(out_ga, maven_name, cap - 1);
+    out_ga[cap - 1] = '\0';
+    return;
+  }
+  const char* c2 = strchr(c1 + 1, ':');
+  size_t n = c2 ? (size_t)(c2 - maven_name) : strlen(maven_name);
+  if (n >= cap) n = cap - 1;
+  memcpy(out_ga, maven_name, n);
+  out_ga[n] = '\0';
+}
+
+static int maven_coord_to_rel_path(const char* coord, char* out, size_t cap) {
+  char tmp[512];
+  strncpy(tmp, coord, sizeof(tmp) - 1);
+  tmp[sizeof(tmp) - 1] = '\0';
+  char* p1 = strchr(tmp, ':');
+  if (!p1) return 0;
+  *p1++ = '\0';
+  char* p2 = strchr(p1, ':');
+  if (!p2) return 0;
+  *p2++ = '\0';
+  char* p3 = strchr(p2, ':');
+  char* cls = NULL;
+  if (p3) {
+    *p3++ = '\0';
+    cls = p3;
+  }
+  for (char* g = tmp; *g; g++) {
+    if (*g == '.') *g = '/';
+  }
+  if (cls && cls[0]) {
+    _snprintf(out, cap, "%s/%s/%s/%s-%s-%s.jar", tmp, p1, p2, p1, p2, cls);
+  } else {
+    _snprintf(out, cap, "%s/%s/%s/%s-%s.jar", tmp, p1, p2, p1, p2);
+  }
+  out[cap - 1] = '\0';
+  return 1;
+}
+
+/* =========================================================================
+ * Parallel Asset / Library Download Workers
+ * ========================================================================= */
+
+typedef struct {
+  char url[1024];
+  wchar_t dest[MAX_PATH];
+  char sha1[48];
+  int is_native_jar;
+  int copy_mc_local;
+  wchar_t mc_local_src[MAX_PATH];
+} PanDlTask;
+
+typedef struct {
+  PanDlTask* tasks;
+  size_t count;
+  volatile LONG next_idx;
+  volatile LONG done_cnt;
+  const wchar_t* natives_dir;
+  int base_pct;
+  int span_pct;
+  const char* label;
+  int fatal_on_fail;
+  volatile LONG failed_flag;
+  char fail_msg[512];
+} PanDlPool;
+
+static DWORD WINAPI dl_pool_worker(LPVOID param) {
+  PanDlPool* pool = (PanDlPool*)param;
+  HINTERNET hSess = create_winhttp_session();
+  if (!hSess) {
+    if (pool->fatal_on_fail && InterlockedCompareExchange(&pool->failed_flag, 1, 0) == 0) {
+      _snprintf(pool->fail_msg, sizeof(pool->fail_msg), "No se pudo inicializar WinHTTP");
+    }
+    return 1;
+  }
+
+  for (;;) {
+    LONG idx = InterlockedIncrement(&pool->next_idx) - 1;
+    if (idx < 0 || (size_t)idx >= pool->count) break;
+    if (pool->failed_flag && pool->fatal_on_fail) break;
+
+    PanDlTask* t = &pool->tasks[idx];
+    if (t->copy_mc_local) {
+      ensure_parent_dir_w(t->dest);
+      if (CopyFileW(t->mc_local_src, t->dest, FALSE)) {
+        InterlockedIncrement(&pool->done_cnt);
+        continue;
+      }
+    }
+
+    char err[512] = {0};
+    if (!http_download_file(hSess, t->url, t->dest, t->sha1, err, sizeof(err))) {
+      if (pool->fatal_on_fail && InterlockedCompareExchange(&pool->failed_flag, 1, 0) == 0) {
+        strncpy(pool->fail_msg, err, sizeof(pool->fail_msg) - 1);
+      }
+    } else if (t->is_native_jar && pool->natives_dir) {
+      extract_native_jar_dlls(t->dest, pool->natives_dir);
+    }
+
+    LONG done = InterlockedIncrement(&pool->done_cnt);
+    if (pool->count > 0 && (done % 40 == 0 || (size_t)done == pool->count)) {
+      int pct = pool->base_pct + (int)(((double)done / (double)pool->count) * pool->span_pct);
+      set_pan_statusf("downloading", pct, "%s: %ld / %zu...", pool->label, done, pool->count);
+    }
+  }
+
+  WinHttpCloseHandle(hSess);
+  return 0;
+}
+
+static int run_dl_pool(PanDlPool* pool, int num_threads) {
+  if (pool->count == 0) return 1;
+  int n = (int)pool->count < num_threads ? (int)pool->count : num_threads;
+  if (n < 1) n = 1;
+  if (n > 8) n = 8;
+
+  HANDLE threads[8];
+  for (int i = 0; i < n; i++) {
+    threads[i] = CreateThread(NULL, 0, dl_pool_worker, pool, 0, NULL);
+  }
+  WaitForMultipleObjects((DWORD)n, threads, TRUE, INFINITE);
+  for (int i = 0; i < n; i++) {
+    if (threads[i]) CloseHandle(threads[i]);
+  }
+  return !(pool->fatal_on_fail && pool->failed_flag);
+}
+
+/* =========================================================================
+ * Command Line / String Replacement / Log Tail
+ * ========================================================================= */
+
+static void str_replace_all(const char* src, const char* needle, const char* rep, char* out, size_t cap) {
+  size_t nlen = strlen(needle);
+  size_t rlen = strlen(rep);
+  size_t j = 0;
+  for (size_t i = 0; src[i] && j + 1 < cap;) {
+    if (nlen > 0 && strncmp(src + i, needle, nlen) == 0) {
+      if (j + rlen + 1 >= cap) break;
+      memcpy(out + j, rep, rlen);
+      j += rlen;
+      i += nlen;
+    } else {
+      out[j++] = src[i++];
+    }
+  }
+  out[j] = '\0';
+}
+
+static void read_log_tail_safe(const wchar_t* path, char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  out[0] = '\0';
+  size_t len = 0;
+  uint8_t* raw = read_entire_file_w(path, &len);
+  if (!raw || len == 0) {
+    free(raw);
+    return;
+  }
+  size_t start = len > 1400 ? len - 1400 : 0;
+  size_t j = 0;
+  for (size_t i = start; i < len && j + 2 < cap; i++) {
+    char c = (char)raw[i];
+    if (c == '\r') continue;
+    if (c == '\n') c = ' ';
+    out[j++] = c;
+  }
+  out[j] = '\0';
+  free(raw);
+}
+
+static char* build_quoted_argfile(const PanStrList* args) {
+  size_t cap = 16384;
+  size_t len = 0;
+  char* buf = (char*)malloc(cap);
+  if (!buf) return NULL;
+
+  for (size_t i = 0; i < args->count; i++) {
+    const char* a = args->items[i];
+    size_t alen = strlen(a);
+    int needs_q = (strchr(a, ' ') != NULL || strchr(a, '\\') != NULL || strchr(a, '"') != NULL || alen == 0);
+    size_t need = alen * 2 + 8;
+    if (len + need >= cap) {
+      while (len + need >= cap) cap *= 2;
+      char* nb = (char*)realloc(buf, cap);
+      if (!nb) {
+        free(buf);
+        return NULL;
+      }
+      buf = nb;
+    }
+    if (needs_q) {
+      buf[len++] = '"';
+      for (size_t k = 0; k < alen; k++) {
+        if (a[k] == '\\' || a[k] == '"') buf[len++] = '\\';
+        buf[len++] = a[k];
+      }
+      buf[len++] = '"';
+    } else {
+      memcpy(buf + len, a, alen);
+      len += alen;
+    }
+    buf[len++] = '\n';
+  }
+  buf[len] = '\0';
+  return buf;
+}
+
+static char* build_win32_cmdline(const wchar_t* exe_path, const PanStrList* args) {
+  char exe_utf8[MAX_PATH * 3];
+  wide_to_utf8(exe_path, exe_utf8, sizeof(exe_utf8));
+
+  size_t cap = 16384;
+  size_t len = 0;
+  char* buf = (char*)malloc(cap);
+  if (!buf) return NULL;
+
+  len += (size_t)_snprintf(buf + len, cap - len, "\"%s\"", exe_utf8);
+  for (size_t i = 0; i < args->count; i++) {
+    const char* a = args->items[i];
+    size_t alen = strlen(a);
+    int needs_q = (strchr(a, ' ') != NULL || strchr(a, '"') != NULL || alen == 0);
+    if (len + alen * 2 + 8 >= cap) {
+      while (len + alen * 2 + 8 >= cap) cap *= 2;
+      char* nb = (char*)realloc(buf, cap);
+      if (!nb) {
+        free(buf);
+        return NULL;
+      }
+      buf = nb;
+    }
+    buf[len++] = ' ';
+    if (needs_q) {
+      buf[len++] = '"';
+      for (size_t k = 0; k < alen; k++) {
+        if (a[k] == '"') buf[len++] = '\\';
+        buf[len++] = a[k];
+      }
+      buf[len++] = '"';
+    } else {
+      memcpy(buf + len, a, alen);
+      len += alen;
+    }
+  }
+  buf[len] = '\0';
+  return buf;
+}
+
+/* =========================================================================
+ * Main Minecraft Launcher Thread
+ * ========================================================================= */
+
+static const struct {
+  const char* mod_id;
+  const char* slug;
+} MODRINTH_SLUGS[] = {
+  {"fabric-api", "fabric-api"},
+  {"sodium", "sodium"},
+  {"lithium", "lithium"},
+  {"immediatelyfast", "immediatelyfast"},
+  {"ferritecore", "ferrite-core"},
+  {"entityculling", "entityculling"},
+  {"modernfix", "modernfix"},
+  {"moreculling", "moreculling"},
+  {"krypton", "krypton"},
+  {"c2me", "c2me-fabric"},
+  {"nvidium", "nvidium"},
+  {"vulkanmod", "vulkanmod"},
+  {NULL, NULL}
+};
+
+static const char* map_mod_slug(const char* mod_id) {
+  for (int i = 0; MODRINTH_SLUGS[i].mod_id; i++) {
+    if (strcmp(MODRINTH_SLUGS[i].mod_id, mod_id) == 0) return MODRINTH_SLUGS[i].slug;
+  }
+  return NULL;
+}
+
+static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
+  (void)param;
+  HINTERNET hSession = NULL;
+  PanJsonValue* req_json = NULL;
+  PanJsonValue* mc_json = NULL;
+  PanJsonValue* asset_idx_json = NULL;
+  PanCpMap cp_map = {0};
+  PanStrList extra_jvm = {0};
+  PanStrList all_args = {0};
+
+  char err_msg[1024] = {0};
+  char mc_ver[64] = "1.21.4";
+  char loader[64] = "Fabric";
+  char inst_dir_utf8[MAX_PATH * 3] = {0};
+
+  char* raw_req = NULL;
+  size_t raw_len = 0;
+  EnterCriticalSection(&g_mc.cs);
+  raw_req = g_mc.pending_req_json;
+  raw_len = g_mc.pending_req_len;
+  g_mc.pending_req_json = NULL;
+  g_mc.pending_req_len = 0;
+  LeaveCriticalSection(&g_mc.cs);
+
+  if (!raw_req || raw_len == 0) {
+    set_pan_status("error", 100, "No se pudo iniciar Minecraft Java", "Solicitud de lanzamiento vacía.", 0, mc_ver, "");
+    InterlockedExchange(&g_mc.launching, 0);
+    return 1;
+  }
+
+  req_json = pan_json_parse(raw_req, raw_len);
+  free(raw_req);
+  if (!req_json || req_json->type != PAN_JSON_OBJECT) {
+    set_pan_status("error", 100, "No se pudo iniciar Minecraft Java", "JSON de lanzamiento inválido.", 0, mc_ver, "");
+    InterlockedExchange(&g_mc.launching, 0);
+    return 1;
+  }
+
+  const char* v_str = pan_json_str(pan_json_get(req_json, "mcVersion"), "1.21.4");
+  strncpy(mc_ver, v_str[0] ? v_str : "1.21.4", sizeof(mc_ver) - 1);
+  const char* l_str = pan_json_str(pan_json_get(req_json, "loader"), "Fabric");
+  strncpy(loader, l_str[0] ? l_str : "Fabric", sizeof(loader) - 1);
+
+  const char* raw_pid = pan_json_str(pan_json_get(req_json, "profileId"), "default");
+  char safe_pid[128];
+  size_t sp = 0;
+  for (size_t i = 0; raw_pid[i] && sp + 1 < sizeof(safe_pid); i++) {
+    unsigned char c = (unsigned char)raw_pid[i];
+    safe_pid[sp++] = (isalnum(c) || c == '.' || c == '_' || c == '-') ? (char)c : '_';
+  }
+  if (sp == 0) {
+    strcpy(safe_pid, "default");
+  } else {
+    safe_pid[sp] = '\0';
+  }
+
+  wchar_t w_mc_ver[64], w_safe_pid[128];
+  utf8_to_wide(mc_ver, w_mc_ver, 64);
+  utf8_to_wide(safe_pid, w_safe_pid, 128);
+
+  wchar_t versions_dir[MAX_PATH], libs_dir[MAX_PATH], assets_dir[MAX_PATH], runtime_dir[MAX_PATH];
+  wchar_t instance_dir[MAX_PATH], natives_dir[MAX_PATH], mods_dir[MAX_PATH];
+  _snwprintf(versions_dir, MAX_PATH, L"%ls\\versions", g_mc.base_dir);
+  _snwprintf(libs_dir, MAX_PATH, L"%ls\\libraries", g_mc.base_dir);
+  _snwprintf(assets_dir, MAX_PATH, L"%ls\\assets", g_mc.base_dir);
+  _snwprintf(runtime_dir, MAX_PATH, L"%ls\\runtime", g_mc.base_dir);
+  _snwprintf(instance_dir, MAX_PATH, L"%ls\\instances\\%ls", g_mc.base_dir, w_safe_pid);
+  _snwprintf(natives_dir, MAX_PATH, L"%ls\\natives", instance_dir);
+  _snwprintf(mods_dir, MAX_PATH, L"%ls\\mods", instance_dir);
+
+  ensure_dir_w(versions_dir);
+  ensure_dir_w(libs_dir);
+  ensure_dir_w(assets_dir);
+  ensure_dir_w(runtime_dir);
+  ensure_dir_w(instance_dir);
+  ensure_dir_w(natives_dir);
+  ensure_dir_w(mods_dir);
+  wide_to_utf8(instance_dir, inst_dir_utf8, sizeof(inst_dir_utf8));
+
+  wchar_t libs_dir_w[MAX_PATH];
+  wcscpy(libs_dir_w, libs_dir);
+  char libs_utf8[MAX_PATH * 3], assets_utf8[MAX_PATH * 3], natives_utf8[MAX_PATH * 3];
+  wide_to_utf8(libs_dir_w, libs_utf8, sizeof(libs_utf8));
+  wide_to_utf8(assets_dir, assets_utf8, sizeof(assets_utf8));
+  wide_to_utf8(natives_dir, natives_utf8, sizeof(natives_utf8));
+
+  hSession = create_winhttp_session();
+  if (!hSession) {
+    snprintf(err_msg, sizeof(err_msg), "No se pudo inicializar WinHTTP en Windows.");
+    goto on_error;
+  }
+
+  /* 1. Mojang Version Manifest */
+  set_pan_status("downloading", 8, "Obteniendo manifiesto oficial de Mojang...", "", 0, mc_ver, inst_dir_utf8);
+  wchar_t mc_json_path[MAX_PATH];
+  _snwprintf(mc_json_path, MAX_PATH, L"%ls\\%ls\\%ls.json", versions_dir, w_mc_ver, w_mc_ver);
+
+  if (!file_exists_nonempty_w(mc_json_path)) {
+    PanJsonValue* manifest = http_get_json(hSession, "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
+                                           err_msg, sizeof(err_msg));
+    if (!manifest) goto on_error;
+    const PanJsonValue* vers = pan_json_get(manifest, "versions");
+    const char* ver_url = NULL;
+    if (vers && vers->type == PAN_JSON_ARRAY) {
+      for (size_t i = 0; i < vers->u.arr.count; i++) {
+        const PanJsonValue* item = vers->u.arr.items[i];
+        const char* id = pan_json_str(pan_json_get(item, "id"), "");
+        if (strcmp(id, mc_ver) == 0) {
+          ver_url = pan_json_str(pan_json_get(item, "url"), NULL);
+          break;
+        }
+      }
+    }
+    if (!ver_url) {
+      pan_json_free(manifest);
+      snprintf(err_msg, sizeof(err_msg), "No se encontró Minecraft %s en Mojang Piston Meta.", mc_ver);
+      goto on_error;
+    }
+    int dl_ok = http_download_file(hSession, ver_url, mc_json_path, NULL, err_msg, sizeof(err_msg));
+    pan_json_free(manifest);
+    if (!dl_ok) goto on_error;
+  }
+
+  {
+    size_t jlen = 0;
+    uint8_t* jraw = read_entire_file_w(mc_json_path, &jlen);
+    if (!jraw) {
+      snprintf(err_msg, sizeof(err_msg), "No se pudo leer %s.json", mc_ver);
+      goto on_error;
+    }
+    mc_json = pan_json_parse((const char*)jraw, jlen);
+    free(jraw);
+    if (!mc_json) {
+      snprintf(err_msg, sizeof(err_msg), "Manifiesto %s.json corrupto.", mc_ver);
+      goto on_error;
+    }
+  }
+
+  /* 2. Java Runtime (use existing user/system Java >= req_java before Adoptium download) */
+  int req_java = 8;
+  const PanJsonValue* jv = pan_json_get(mc_json, "javaVersion");
+  if (jv) req_java = (int)pan_json_num(pan_json_get(jv, "majorVersion"), 8);
+  int java_major = (req_java >= 25) ? req_java : (req_java >= 21 ? 21 : (req_java >= 17 ? 17 : 8));
+  const char* custom_java = pan_json_str(pan_json_get(req_json, "javaPath"), "");
+
+  wchar_t jre_dir[MAX_PATH], javaw_path[MAX_PATH];
+  _snwprintf(jre_dir, MAX_PATH, L"%ls\\jre%d", runtime_dir, java_major);
+  int have_java = find_matching_javaw_in_tree(jre_dir, java_major, 0, javaw_path, MAX_PATH);
+  if (!have_java) {
+    have_java = find_system_javaw(java_major, custom_java, javaw_path, MAX_PATH);
+    if (have_java) {
+      set_pan_statusf("downloading", 26, "Usando Java %d ya instalado en tu PC...", java_major);
+    }
+  }
+  if (!have_java && !find_javaw_recursive(jre_dir, javaw_path, MAX_PATH)) {
+    set_pan_statusf("downloading", 16, "Descargando Java %d (Eclipse Temurin JRE)...", java_major);
+    wchar_t jre_zip[MAX_PATH];
+    _snwprintf(jre_zip, MAX_PATH, L"%ls\\jre%d.zip", runtime_dir, java_major);
+    char jre_url[256], jdk_url[256];
+    snprintf(jre_url, sizeof(jre_url),
+             "https://api.adoptium.net/v3/binary/latest/%d/ga/windows/x64/jre/hotspot/normal/eclipse",
+             java_major);
+    snprintf(jdk_url, sizeof(jdk_url),
+             "https://api.adoptium.net/v3/binary/latest/%d/ga/windows/x64/jdk/hotspot/normal/eclipse",
+             java_major);
+    if (!http_download_file(hSession, jre_url, jre_zip, NULL, err_msg, sizeof(err_msg))) {
+      err_msg[0] = '\0';
+      if (!http_download_file(hSession, jdk_url, jre_zip, NULL, err_msg, sizeof(err_msg))) goto on_error;
+    }
+
+    set_pan_statusf("downloading", 24, "Extrayendo Java %d en tu PC...", java_major);
+    ensure_dir_w(jre_dir);
+    size_t zlen = 0;
+    uint8_t* zbuf = read_entire_file_w(jre_zip, &zlen);
+    if (!zbuf || !pan_zip_extract_memory(zbuf, zlen, extract_full_zip_cb, jre_dir)) {
+      free(zbuf);
+      snprintf(err_msg, sizeof(err_msg), "No se pudo extraer Java %d en AppData\\Local\\Pan-launcher\\runtime.", java_major);
+      goto on_error;
+    }
+    free(zbuf);
+    DeleteFileW(jre_zip);
+
+    if (!find_javaw_recursive(jre_dir, javaw_path, MAX_PATH)) {
+      snprintf(err_msg, sizeof(err_msg), "No se encontró javaw.exe tras instalar Java %d.", java_major);
+      goto on_error;
+    }
+  }
+
+  /* 3. Client JAR */
+  set_pan_statusf("downloading", 30, "Descargando cliente oficial de Minecraft %s...", mc_ver);
+  wchar_t client_jar[MAX_PATH];
+  _snwprintf(client_jar, MAX_PATH, L"%ls\\%ls\\%ls.jar", versions_dir, w_mc_ver, w_mc_ver);
+  {
+    const PanJsonValue* dl_client = pan_json_get(pan_json_get(mc_json, "downloads"), "client");
+    const char* c_url = pan_json_str(pan_json_get(dl_client, "url"), NULL);
+    const char* c_sha = pan_json_str(pan_json_get(dl_client, "sha1"), "");
+    if (!c_url) {
+      snprintf(err_msg, sizeof(err_msg), "Falta URL de client.jar en manifiesto Mojang.");
+      goto on_error;
+    }
+    if (!http_download_file(hSession, c_url, client_jar, c_sha, err_msg, sizeof(err_msg))) goto on_error;
+  }
+
+  /* 4. Mojang Libraries & Windows Natives (Parallel) */
+  set_pan_status("downloading", 38, "Verificando librerías de Minecraft y natives Windows...", "", 0, NULL, NULL);
+  {
+    const PanJsonValue* libs = pan_json_get(mc_json, "libraries");
+    size_t max_tasks = (libs && libs->type == PAN_JSON_ARRAY) ? libs->u.arr.count * 2 + 4 : 4;
+    PanDlTask* tasks = (PanDlTask*)calloc(max_tasks, sizeof(PanDlTask));
+    size_t tcnt = 0;
+
+    if (libs && libs->type == PAN_JSON_ARRAY) {
+      for (size_t i = 0; i < libs->u.arr.count; i++) {
+        const PanJsonValue* lib = libs->u.arr.items[i];
+        if (!test_mojang_rules(pan_json_get(lib, "rules"))) continue;
+        const char* lname = pan_json_str(pan_json_get(lib, "name"), "");
+        if (strstr(lname, ":natives-windows-arm64") || strstr(lname, ":natives-windows-x86")) continue;
+
+        const PanJsonValue* dls = pan_json_get(lib, "downloads");
+        const PanJsonValue* nat_obj = pan_json_get(lib, "natives");
+        const PanJsonValue* art = pan_json_get(dls, "artifact");
+        if (art) {
+          const char* aurl = pan_json_str(pan_json_get(art, "url"), NULL);
+          const char* apath = pan_json_str(pan_json_get(art, "path"), NULL);
+          const char* asha = pan_json_str(pan_json_get(art, "sha1"), "");
+          if (aurl && apath && tcnt < max_tasks) {
+            wchar_t wrel[MAX_PATH];
+            utf8_to_wide(apath, wrel, MAX_PATH);
+            for (int k = 0; wrel[k]; k++) if (wrel[k] == L'/') wrel[k] = L'\\';
+            PanDlTask* t = &tasks[tcnt++];
+            strncpy(t->url, aurl, sizeof(t->url) - 1);
+            _snwprintf(t->dest, MAX_PATH, L"%ls\\%ls", libs_dir, wrel);
+            strncpy(t->sha1, asha, sizeof(t->sha1) - 1);
+            if (strstr(lname, ":natives-windows")) {
+              t->is_native_jar = 1;
+            } else if (!nat_obj) {
+              char ga[256];
+              split_ga_key(lname, ga, sizeof(ga));
+              cpmap_set(&cp_map, ga, t->dest);
+            }
+          }
+        }
+
+        const PanJsonValue* cls_obj = pan_json_get(dls, "classifiers");
+        if (cls_obj) {
+          char resolved_key[64] = "natives-windows";
+          const char* win_key = pan_json_str(pan_json_get(nat_obj, "windows"), NULL);
+          if (win_key) {
+            str_replace_all(win_key, "${arch}", "64", resolved_key, sizeof(resolved_key));
+          }
+          const PanJsonValue* c_nat = pan_json_get(cls_obj, resolved_key);
+          if (c_nat && tcnt < max_tasks) {
+            const char* nurl = pan_json_str(pan_json_get(c_nat, "url"), NULL);
+            const char* npath = pan_json_str(pan_json_get(c_nat, "path"), NULL);
+            const char* nsha = pan_json_str(pan_json_get(c_nat, "sha1"), "");
+            if (nurl && npath) {
+              wchar_t wrel[MAX_PATH];
+              utf8_to_wide(npath, wrel, MAX_PATH);
+              for (int k = 0; wrel[k]; k++) if (wrel[k] == L'/') wrel[k] = L'\\';
+              PanDlTask* t = &tasks[tcnt++];
+              strncpy(t->url, nurl, sizeof(t->url) - 1);
+              _snwprintf(t->dest, MAX_PATH, L"%ls\\%ls", libs_dir, wrel);
+              strncpy(t->sha1, nsha, sizeof(t->sha1) - 1);
+              t->is_native_jar = 1;
+            }
+          }
+        }
+      }
+    }
+
+    PanDlPool pool = {0};
+    pool.tasks = tasks;
+    pool.count = tcnt;
+    pool.natives_dir = natives_dir;
+    pool.base_pct = 38;
+    pool.span_pct = 18;
+    pool.label = "Verificando librerías";
+    pool.fatal_on_fail = 1;
+    int ok = run_dl_pool(&pool, 6);
+    if (!ok) {
+      strncpy(err_msg, pool.fail_msg, sizeof(err_msg) - 1);
+      free(tasks);
+      goto on_error;
+    }
+    free(tasks);
+  }
+
+  /* 5. Assets Index & Objects */
+  set_pan_status("downloading", 58, "Verificando índice de assets (texturas y sonido)...", "", 0, NULL, NULL);
+  const char* asset_id = pan_json_str(pan_json_get(pan_json_get(mc_json, "assetIndex"), "id"), "17");
+  {
+    const PanJsonValue* ai_meta = pan_json_get(mc_json, "assetIndex");
+    const char* ai_url = pan_json_str(pan_json_get(ai_meta, "url"), NULL);
+    const char* ai_sha = pan_json_str(pan_json_get(ai_meta, "sha1"), "");
+    wchar_t w_aid[64], ai_path[MAX_PATH];
+    utf8_to_wide(asset_id, w_aid, 64);
+    _snwprintf(ai_path, MAX_PATH, L"%ls\\indexes\\%ls.json", assets_dir, w_aid);
+    if (!ai_url || !http_download_file(hSession, ai_url, ai_path, ai_sha, err_msg, sizeof(err_msg))) {
+      if (!err_msg[0]) snprintf(err_msg, sizeof(err_msg), "Falta índice de assets.");
+      goto on_error;
+    }
+    size_t alen = 0;
+    uint8_t* araw = read_entire_file_w(ai_path, &alen);
+    asset_idx_json = araw ? pan_json_parse((const char*)araw, alen) : NULL;
+    free(araw);
+    if (!asset_idx_json) {
+      snprintf(err_msg, sizeof(err_msg), "Índice de assets inválido.");
+      goto on_error;
+    }
+
+    const PanJsonValue* objs = pan_json_get(asset_idx_json, "objects");
+    if (objs && objs->type == PAN_JSON_OBJECT && objs->u.obj.count > 0) {
+      wchar_t appdata[MAX_PATH] = {0};
+      GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
+      wchar_t mc_local_objs[MAX_PATH];
+      _snwprintf(mc_local_objs, MAX_PATH, L"%ls\\.minecraft\\assets\\objects", appdata);
+
+      PanDlTask* atasks = (PanDlTask*)calloc(objs->u.obj.count, sizeof(PanDlTask));
+      size_t acnt = 0;
+      for (size_t i = 0; i < objs->u.obj.count; i++) {
+        const PanJsonValue* ov = objs->u.obj.pairs[i].val;
+        const char* hash = pan_json_str(pan_json_get(ov, "hash"), "");
+        if (strlen(hash) < 3) continue;
+        wchar_t wpref[4], whash[128];
+        wpref[0] = (wchar_t)hash[0];
+        wpref[1] = (wchar_t)hash[1];
+        wpref[2] = L'\0';
+        utf8_to_wide(hash, whash, 128);
+        wchar_t dest[MAX_PATH];
+        _snwprintf(dest, MAX_PATH, L"%ls\\objects\\%ls\\%ls", assets_dir, wpref, whash);
+        if (file_exists_nonempty_w(dest)) continue;
+
+        PanDlTask* t = &atasks[acnt++];
+        snprintf(t->url, sizeof(t->url), "https://resources.download.minecraft.net/%.2s/%s", hash, hash);
+        wcscpy(t->dest, dest);
+        wchar_t mc_src[MAX_PATH];
+        _snwprintf(mc_src, MAX_PATH, L"%ls\\%ls\\%ls", mc_local_objs, wpref, whash);
+        if (appdata[0] && file_exists_nonempty_w(mc_src)) {
+          t->copy_mc_local = 1;
+          wcscpy(t->mc_local_src, mc_src);
+        }
+      }
+
+      if (acnt > 0) {
+        set_pan_statusf("downloading", 62, "Descargando %zu assets en paralelo...", acnt);
+        PanDlPool apool = {0};
+        apool.tasks = atasks;
+        apool.count = acnt;
+        apool.base_pct = 62;
+        apool.span_pct = 16;
+        apool.label = "Assets descargados";
+        apool.fatal_on_fail = 0;
+        run_dl_pool(&apool, 8);
+      }
+      free(atasks);
+    }
+  }
+
+  /* 6. Fabric Loader */
+  char main_class[256];
+  strncpy(main_class, pan_json_str(pan_json_get(mc_json, "mainClass"), "net.minecraft.client.main.Main"), sizeof(main_class) - 1);
+  main_class[sizeof(main_class) - 1] = '\0';
+
+  int fabric_loaded = 0;
+  if (strcmp(loader, "Fabric") == 0 || strcmp(loader, "Quilt") == 0 || strcmp(loader, "NeoForge") == 0) {
+    set_pan_statusf("downloading", 80, "Instalando Fabric Loader para Minecraft %s...", mc_ver);
+    char lurl[256];
+    snprintf(lurl, sizeof(lurl), "https://meta.fabricmc.net/v2/versions/loader/%s", mc_ver);
+    char tmp_err[256] = {0};
+    PanJsonValue* loaders = http_get_json(hSession, lurl, tmp_err, sizeof(tmp_err));
+    if (loaders && loaders->type == PAN_JSON_ARRAY && loaders->u.arr.count > 0) {
+      const char* f_ver = NULL;
+      for (size_t i = 0; i < loaders->u.arr.count; i++) {
+        const PanJsonValue* lnode = pan_json_get(loaders->u.arr.items[i], "loader");
+        if (pan_json_bool(pan_json_get(lnode, "stable"), 0)) {
+          f_ver = pan_json_str(pan_json_get(lnode, "version"), NULL);
+          break;
+        }
+      }
+      if (!f_ver) {
+        f_ver = pan_json_str(pan_json_get(pan_json_get(loaders->u.arr.items[0], "loader"), "version"), NULL);
+      }
+      if (f_ver) {
+        char purl[320];
+        snprintf(purl, sizeof(purl), "https://meta.fabricmc.net/v2/versions/loader/%s/%s/profile/json", mc_ver, f_ver);
+        PanJsonValue* fjson = http_get_json(hSession, purl, tmp_err, sizeof(tmp_err));
+        if (fjson) {
+          const PanJsonValue* flibs = pan_json_get(fjson, "libraries");
+          if (flibs && flibs->type == PAN_JSON_ARRAY) {
+            for (size_t i = 0; i < flibs->u.arr.count; i++) {
+              const PanJsonValue* flib = flibs->u.arr.items[i];
+              const char* fname = pan_json_str(pan_json_get(flib, "name"), "");
+              const char* fbase = pan_json_str(pan_json_get(flib, "url"), "https://maven.fabricmc.net/");
+              char rel[512];
+              if (maven_coord_to_rel_path(fname, rel, sizeof(rel))) {
+                char furl[768];
+                size_t blen = strlen(fbase);
+                snprintf(furl, sizeof(furl), "%s%s%s", fbase, (blen > 0 && fbase[blen - 1] == '/') ? "" : "/", rel);
+                wchar_t wrel[MAX_PATH], fdest[MAX_PATH];
+                utf8_to_wide(rel, wrel, MAX_PATH);
+                for (int k = 0; wrel[k]; k++) if (wrel[k] == L'/') wrel[k] = L'\\';
+                _snwprintf(fdest, MAX_PATH, L"%ls\\%ls", libs_dir, wrel);
+                if (http_download_file(hSession, furl, fdest, NULL, tmp_err, sizeof(tmp_err))) {
+                  char ga[256];
+                  split_ga_key(fname, ga, sizeof(ga));
+                  cpmap_set(&cp_map, ga, fdest);
+                }
+              }
+            }
+          }
+          const char* fmc = pan_json_str(pan_json_get(fjson, "mainClass"), NULL);
+          if (fmc && fmc[0]) {
+            strncpy(main_class, fmc, sizeof(main_class) - 1);
+          }
+          const PanJsonValue* fjvm = pan_json_get(pan_json_get(fjson, "arguments"), "jvm");
+          if (fjvm && fjvm->type == PAN_JSON_ARRAY) {
+            for (size_t i = 0; i < fjvm->u.arr.count; i++) {
+              const char* ja = pan_json_str(fjvm->u.arr.items[i], NULL);
+              if (ja) {
+                while (*ja == ' ') ja++;
+                char* dup = xstrdup(ja);
+                size_t dlen = strlen(dup);
+                while (dlen > 0 && (dup[dlen - 1] == ' ' || dup[dlen - 1] == '\t')) dup[--dlen] = '\0';
+                if (dup[0]) strlist_add(&extra_jvm, dup);
+                free(dup);
+              }
+            }
+          }
+          fabric_loaded = 1;
+          pan_json_free(fjson);
+        }
+      }
+      pan_json_free(loaders);
+    }
+    if (!fabric_loaded) {
+      set_pan_statusf("downloading", 82, "Fabric no disponible para %s, iniciando modo Vanilla...", mc_ver);
+    }
+  }
+
+  /* 7. Modrinth FPS Mods & Dependencies */
+  if (fabric_loaded) {
+    set_pan_status("downloading", 85, "Descargando mods FPS y dependencias en Modrinth...", "", 0, NULL, NULL);
+    wchar_t managed_path[MAX_PATH];
+    _snwprintf(managed_path, MAX_PATH, L"%ls\\pan-managed-mods.json", instance_dir);
+    {
+      size_t mlen = 0;
+      uint8_t* mraw = read_entire_file_w(managed_path, &mlen);
+      if (mraw) {
+        PanJsonValue* prev = pan_json_parse((const char*)mraw, mlen);
+        if (prev && prev->type == PAN_JSON_ARRAY) {
+          for (size_t i = 0; i < prev->u.arr.count; i++) {
+            const char* old_jar = pan_json_str(prev->u.arr.items[i], NULL);
+            if (old_jar && old_jar[0]) {
+              wchar_t wold[MAX_PATH], wfull[MAX_PATH];
+              utf8_to_wide(old_jar, wold, MAX_PATH);
+              _snwprintf(wfull, MAX_PATH, L"%ls\\%ls", mods_dir, wold);
+              DeleteFileW(wfull);
+            }
+          }
+        }
+        pan_json_free(prev);
+        free(mraw);
+      }
+    }
+
+    int has_sodium = 0;
+    const PanJsonValue* emods = pan_json_get(req_json, "enabledModIds");
+    if (emods && emods->type == PAN_JSON_ARRAY) {
+      for (size_t i = 0; i < emods->u.arr.count; i++) {
+        if (strcmp(pan_json_str(emods->u.arr.items[i], ""), "sodium") == 0) has_sodium = 1;
+      }
+    }
+
+    PanStrList queue = {0};
+    PanStrList visited = {0};
+    PanStrList new_managed = {0};
+    strlist_add(&queue, "fabric-api");
+    if (emods && emods->type == PAN_JSON_ARRAY) {
+      for (size_t i = 0; i < emods->u.arr.count; i++) {
+        const char* mid = pan_json_str(emods->u.arr.items[i], "");
+        if (strcmp(mid, "vulkanmod") == 0 && has_sodium) continue;
+        const char* slug = map_mod_slug(mid);
+        if (slug) strlist_add(&queue, slug);
+      }
+    }
+
+    for (size_t qidx = 0; qidx < queue.count; qidx++) {
+      const char* proj = queue.items[qidx];
+      if (strlist_contains(&visited, proj)) continue;
+      strlist_add(&visited, proj);
+
+      char murl[512];
+      snprintf(murl, sizeof(murl),
+               "https://api.modrinth.com/v2/project/%s/version?game_versions=%%5B%%22%s%%22%%5D&loaders=%%5B%%22fabric%%22%%5D",
+               proj, mc_ver);
+      char tmp_err[256] = {0};
+      PanJsonValue* mvers = http_get_json(hSession, murl, tmp_err, sizeof(tmp_err));
+      if (mvers && mvers->type == PAN_JSON_ARRAY && mvers->u.arr.count > 0) {
+        const PanJsonValue* chosen = mvers->u.arr.items[0];
+        const PanJsonValue* files = pan_json_get(chosen, "files");
+        const PanJsonValue* mfile = NULL;
+        if (files && files->type == PAN_JSON_ARRAY && files->u.arr.count > 0) {
+          for (size_t f = 0; f < files->u.arr.count; f++) {
+            if (pan_json_bool(pan_json_get(files->u.arr.items[f], "primary"), 0)) {
+              mfile = files->u.arr.items[f];
+              break;
+            }
+          }
+          if (!mfile) mfile = files->u.arr.items[0];
+        }
+        if (mfile) {
+          const char* furl = pan_json_str(pan_json_get(mfile, "url"), NULL);
+          const char* fname = pan_json_str(pan_json_get(mfile, "filename"), NULL);
+          const char* fsha1 = pan_json_str(pan_json_get(pan_json_get(mfile, "hashes"), "sha1"), "");
+          if (furl && fname) {
+            wchar_t wfn[256], mdest[MAX_PATH];
+            utf8_to_wide(fname, wfn, 256);
+            _snwprintf(mdest, MAX_PATH, L"%ls\\%ls", mods_dir, wfn);
+            if (http_download_file(hSession, furl, mdest, fsha1, tmp_err, sizeof(tmp_err))) {
+              strlist_add(&new_managed, fname);
+            }
+          }
+        }
+        const PanJsonValue* deps = pan_json_get(chosen, "dependencies");
+        if (deps && deps->type == PAN_JSON_ARRAY) {
+          for (size_t d = 0; d < deps->u.arr.count; d++) {
+            const PanJsonValue* dep = deps->u.arr.items[d];
+            const char* dtype = pan_json_str(pan_json_get(dep, "dependency_type"), "");
+            const char* dpid = pan_json_str(pan_json_get(dep, "project_id"), "");
+            if (strcmp(dtype, "required") == 0 && dpid[0] && !strlist_contains(&visited, dpid)) {
+              strlist_add(&queue, dpid);
+            }
+          }
+        }
+      }
+      pan_json_free(mvers);
+    }
+
+    char* m_out = (char*)malloc(8192);
+    if (m_out) {
+      size_t p = 0;
+      m_out[p++] = '[';
+      for (size_t i = 0; i < new_managed.count && p + 300 < 8192; i++) {
+        char sj[512];
+        sanitize_json_str(new_managed.items[i], sj, sizeof(sj));
+        p += (size_t)_snprintf(m_out + p, 8192 - p, "%s\"%s\"", (i > 0 ? "," : ""), sj);
+      }
+      m_out[p++] = ']';
+      m_out[p] = '\0';
+      write_entire_file_w(managed_path, m_out, p);
+      free(m_out);
+    }
+
+    strlist_free(&queue);
+    strlist_free(&visited);
+    strlist_free(&new_managed);
+  }
+
+  /* 8. Write options.txt */
+  {
+    const char* opt_txt = pan_json_str(pan_json_get(req_json, "optionsTxt"), NULL);
+    if (opt_txt && opt_txt[0]) {
+      wchar_t opt_path[MAX_PATH];
+      _snwprintf(opt_path, MAX_PATH, L"%ls\\options.txt", instance_dir);
+      write_entire_file_w(opt_path, opt_txt, strlen(opt_txt));
+    }
+  }
+
+  /* 9. Build Classpath & JVM Arguments */
+  set_pan_statusf("launching", 93, "Configurando JVM y argumentos de Minecraft %s...", mc_ver);
+  char* classpath = NULL;
+  {
+    char client_utf8[MAX_PATH * 3];
+    wide_to_utf8(client_jar, client_utf8, sizeof(client_utf8));
+    size_t cp_cap = 32768;
+    size_t cp_len = 0;
+    classpath = (char*)malloc(cp_cap);
+    for (size_t i = 0; i < cp_map.count; i++) {
+      char item_u8[MAX_PATH * 3];
+      wide_to_utf8(cp_map.items[i].val, item_u8, sizeof(item_u8));
+      size_t ilen = strlen(item_u8);
+      if (cp_len + ilen + 8 >= cp_cap) {
+        cp_cap *= 2;
+        classpath = (char*)realloc(classpath, cp_cap);
+      }
+      memcpy(classpath + cp_len, item_u8, ilen);
+      cp_len += ilen;
+      classpath[cp_len++] = ';';
+    }
+    size_t clen = strlen(client_utf8);
+    if (cp_len + clen + 4 >= cp_cap) {
+      cp_cap = cp_len + clen + 16;
+      classpath = (char*)realloc(classpath, cp_cap);
+    }
+    memcpy(classpath + cp_len, client_utf8, clen);
+    cp_len += clen;
+    classpath[cp_len] = '\0';
+  }
+
+  MEMORYSTATUSEX ms;
+  ms.dwLength = sizeof(ms);
+  int total_ram_mb = 8192;
+  if (GlobalMemoryStatusEx(&ms)) {
+    total_ram_mb = (int)(ms.ullTotalPhys / (1024ULL * 1024ULL));
+  }
+  int max_safe_mb = (total_ram_mb * 72) / 100;
+  if (max_safe_mb < 1536) max_safe_mb = 1536;
+  double req_gb = pan_json_num(pan_json_get(req_json, "ramGb"), 4.0);
+  int req_mb = (int)(req_gb * 1024.0 + 0.5);
+  if (req_mb < 1024) req_mb = 1024;
+  int ram_mb = req_mb < max_safe_mb ? req_mb : max_safe_mb;
+  int xms_mb = ram_mb < 1024 ? ram_mb : 1024;
+
+  char xms_arg[64], xmx_arg[64];
+  snprintf(xms_arg, sizeof(xms_arg), "-Xms%dM", xms_mb);
+  snprintf(xmx_arg, sizeof(xmx_arg), "-Xmx%dM", ram_mb);
+  strlist_add(&all_args, xms_arg);
+  strlist_add(&all_args, xmx_arg);
+
+  const char* gc_choice = pan_json_str(pan_json_get(req_json, "gc"), "ZGC");
+  if (strcmp(gc_choice, "ZGC") == 0 && java_major >= 21) {
+    strlist_add(&all_args, "-XX:+UseZGC");
+    if (java_major >= 24) {
+      strlist_add(&all_args, "-XX:+UnlockExperimentalVMOptions");
+      strlist_add(&all_args, "-XX:+UseCompactObjectHeaders");
+    } else {
+      strlist_add(&all_args, "-XX:+ZGenerational");
+    }
+  } else if (strcmp(gc_choice, "Shenandoah") == 0 && java_major >= 17) {
+    strlist_add(&all_args, "-XX:+UseShenandoahGC");
+  } else {
+    strlist_add(&all_args, "-XX:+UseG1GC");
+    strlist_add(&all_args, "-XX:+UnlockExperimentalVMOptions");
+    strlist_add(&all_args, "-XX:G1NewSizePercent=20");
+    strlist_add(&all_args, "-XX:G1ReservePercent=20");
+    strlist_add(&all_args, "-XX:MaxGCPauseMillis=35");
+    strlist_add(&all_args, "-XX:G1HeapRegionSize=32M");
+  }
+
+  if (pan_json_bool(pan_json_get(req_json, "alwaysPreTouch"), 1)) {
+    strlist_add(&all_args, "-XX:+AlwaysPreTouch");
+  }
+  if (pan_json_bool(pan_json_get(req_json, "stringDeduplication"), 0) &&
+      (strcmp(gc_choice, "ZGC") != 0 || java_major < 21)) {
+    strlist_add(&all_args, "-XX:+UseStringDeduplication");
+  }
+  int pthreads = (int)pan_json_num(pan_json_get(req_json, "parallelThreads"), 4);
+  if (pthreads < 1) pthreads = 1;
+  if (pthreads > 8) pthreads = 8;
+  {
+    char pt_arg[64];
+    snprintf(pt_arg, sizeof(pt_arg), "-XX:ConcGCThreads=%d", pthreads);
+    strlist_add(&all_args, pt_arg);
+  }
+  strlist_add(&all_args, "-XX:+DisableExplicitGC");
+  strlist_add(&all_args, "-XX:+PerfDisableSharedMem");
+  strlist_add(&all_args, "-Djdk.nio.maxCachedBufferSize=262144");
+
+  {
+    char buf[1024];
+    snprintf(buf, sizeof(buf), "-Djava.library.path=%s", natives_utf8);
+    strlist_add(&all_args, buf);
+    snprintf(buf, sizeof(buf), "-Djna.tmpdir=%s", natives_utf8);
+    strlist_add(&all_args, buf);
+    snprintf(buf, sizeof(buf), "-Dorg.lwjgl.system.SharedLibraryExtractPath=%s", natives_utf8);
+    strlist_add(&all_args, buf);
+    snprintf(buf, sizeof(buf), "-Dio.netty.native.workdir=%s", natives_utf8);
+    strlist_add(&all_args, buf);
+  }
+  strlist_add(&all_args, "-Dminecraft.launcher.brand=Pan-launcher");
+  strlist_add(&all_args, "-Dminecraft.launcher.version=2.3");
+
+  for (size_t i = 0; i < extra_jvm.count; i++) {
+    const char* ej = extra_jvm.items[i];
+    if (strcmp(ej, "-cp") != 0 && strcmp(ej, "${classpath}") != 0) {
+      strlist_add(&all_args, ej);
+    }
+  }
+
+  const PanJsonValue* mc_jvm = pan_json_get(pan_json_get(mc_json, "arguments"), "jvm");
+  if (mc_jvm && mc_jvm->type == PAN_JSON_ARRAY) {
+    for (size_t i = 0; i < mc_jvm->u.arr.count; i++) {
+      const char* item = pan_json_str(mc_jvm->u.arr.items[i], NULL);
+      if (!item) continue;
+      if (strcmp(item, "-cp") == 0 || strcmp(item, "${classpath}") == 0) continue;
+      if (strncmp(item, "-Djava.library.path=", 20) == 0 ||
+          strncmp(item, "-Djna.tmpdir=", 13) == 0 ||
+          strncmp(item, "-Dorg.lwjgl.system.SharedLibraryExtractPath=", 44) == 0 ||
+          strncmp(item, "-Dio.netty.native.workdir=", 26) == 0 ||
+          strncmp(item, "-Dminecraft.launcher.", 21) == 0) continue;
+      char r1[1024], r2[1024], r3[1024];
+      str_replace_all(item, "${natives_directory}", natives_utf8, r1, sizeof(r1));
+      str_replace_all(r1, "${launcher_name}", "Pan-launcher", r2, sizeof(r2));
+      str_replace_all(r2, "${launcher_version}", "2.3", r3, sizeof(r3));
+      if (r3[0]) strlist_add(&all_args, r3);
+    }
+  }
+
+  const char* custom_args = pan_json_str(pan_json_get(req_json, "customArgs"), "");
+  if (custom_args[0]) {
+    char* copy = xstrdup(custom_args);
+    char* ctx = NULL;
+    for (char* tok = strtok_s(copy, " ", &ctx); tok; tok = strtok_s(NULL, " ", &ctx)) {
+      if (tok[0]) strlist_add(&all_args, tok);
+    }
+    free(copy);
+  }
+
+  strlist_add(&all_args, "-cp");
+  strlist_add(&all_args, classpath);
+  free(classpath);
+  classpath = NULL;
+
+  strlist_add(&all_args, main_class);
+
+  /* Game Arguments */
+  const char* player_name = pan_json_str(pan_json_get(req_json, "username"), "PanWarrior");
+  if (!player_name[0]) player_name = "PanWarrior";
+  const char* acc_type = pan_json_str(pan_json_get(req_json, "accountType"), "offline");
+  char player_uuid[48];
+  if (strcmp(acc_type, "offline") == 0) {
+    compute_offline_uuid(player_name, player_uuid);
+  } else {
+    const char* ruuid = pan_json_str(pan_json_get(req_json, "uuid"), "");
+    size_t u = 0;
+    for (size_t i = 0; ruuid[i] && u + 1 < sizeof(player_uuid); i++) {
+      if (ruuid[i] != '-') player_uuid[u++] = ruuid[i];
+    }
+    player_uuid[u] = '\0';
+    if (!player_uuid[0]) compute_offline_uuid(player_name, player_uuid);
+  }
+
+  PanStrList raw_tokens = {0};
+  const PanJsonValue* mc_game = pan_json_get(pan_json_get(mc_json, "arguments"), "game");
+  if (mc_game && mc_game->type == PAN_JSON_ARRAY) {
+    for (size_t i = 0; i < mc_game->u.arr.count; i++) {
+      const char* s = pan_json_str(mc_game->u.arr.items[i], NULL);
+      if (s) strlist_add(&raw_tokens, s);
+    }
+  } else {
+    const char* legacy = pan_json_str(pan_json_get(mc_json, "minecraftArguments"), NULL);
+    if (legacy) {
+      char* copy = xstrdup(legacy);
+      char* ctx = NULL;
+      for (char* tok = strtok_s(copy, " ", &ctx); tok; tok = strtok_s(NULL, " ", &ctx)) {
+        if (tok[0]) strlist_add(&raw_tokens, tok);
+      }
+      free(copy);
+    }
+  }
+
+  for (size_t i = 0; i < raw_tokens.count; i++) {
+    char a[1024], b[1024];
+    strncpy(a, raw_tokens.items[i], sizeof(a) - 1);
+    a[sizeof(a) - 1] = '\0';
+    str_replace_all(a, "${auth_player_name}", player_name, b, sizeof(b));
+    str_replace_all(b, "${version_name}", mc_ver, a, sizeof(a));
+    str_replace_all(a, "${game_directory}", inst_dir_utf8, b, sizeof(b));
+    str_replace_all(b, "${assets_root}", assets_utf8, a, sizeof(a));
+    str_replace_all(a, "${assets_index_name}", asset_id, b, sizeof(b));
+    str_replace_all(b, "${auth_uuid}", player_uuid, a, sizeof(a));
+    str_replace_all(a, "${auth_access_token}", "0", b, sizeof(b));
+    str_replace_all(b, "${clientid}", "0", a, sizeof(a));
+    str_replace_all(a, "${auth_xuid}", "0", b, sizeof(b));
+    str_replace_all(b, "${user_type}", "legacy", a, sizeof(a));
+    str_replace_all(a, "${version_type}", "Pan-launcher", b, sizeof(b));
+    str_replace_all(b, "${user_properties}", "{}", a, sizeof(a));
+    strlist_add(&all_args, a);
+  }
+  strlist_free(&raw_tokens);
+
+  const char* srv_addr = pan_json_str(pan_json_get(req_json, "serverAddress"), NULL);
+  if (srv_addr && srv_addr[0]) {
+    char shost[256] = {0}, sport[32] = "25565";
+    const char* colon = strchr(srv_addr, ':');
+    if (colon) {
+      size_t hlen = (size_t)(colon - srv_addr);
+      if (hlen >= sizeof(shost)) hlen = sizeof(shost) - 1;
+      memcpy(shost, srv_addr, hlen);
+      shost[hlen] = '\0';
+      if (colon[1]) strncpy(sport, colon + 1, sizeof(sport) - 1);
+    } else {
+      strncpy(shost, srv_addr, sizeof(shost) - 1);
+    }
+    if (mc_game && mc_game->type == PAN_JSON_ARRAY) {
+      char hp[300];
+      snprintf(hp, sizeof(hp), "%s:%s", shost, sport);
+      strlist_add(&all_args, "--quickPlayMultiplayer");
+      strlist_add(&all_args, hp);
+    } else {
+      strlist_add(&all_args, "--server");
+      strlist_add(&all_args, shost);
+      strlist_add(&all_args, "--port");
+      strlist_add(&all_args, sport);
+    }
+  }
+
+  /* 10. Spawn javaw.exe cleanly with stdout/stderr log capture */
+  set_pan_statusf("launching", 97, "Abriendo ventana real de Minecraft Java (%s)...", mc_ver);
+
+  wchar_t out_log[MAX_PATH], err_log[MAX_PATH];
+  _snwprintf(out_log, MAX_PATH, L"%ls\\latest-stdout.log", instance_dir);
+  _snwprintf(err_log, MAX_PATH, L"%ls\\latest-stderr.log", instance_dir);
+  DeleteFileW(out_log);
+  DeleteFileW(err_log);
+
+  SECURITY_ATTRIBUTES sa;
+  ZeroMemory(&sa, sizeof(sa));
+  sa.nLength = sizeof(sa);
+  sa.bInheritHandle = TRUE;
+
+  HANDLE hOut = CreateFileW(out_log, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                            &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  HANDLE hErr = CreateFileW(err_log, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                            &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+
+  wchar_t w_cmdline[32768] = {0};
+  if (java_major >= 17) {
+    wchar_t arg_file[MAX_PATH];
+    _snwprintf(arg_file, MAX_PATH, L"%ls\\jvm-args.txt", instance_dir);
+    char* af_body = build_quoted_argfile(&all_args);
+    if (!af_body || !write_entire_file_w(arg_file, af_body, strlen(af_body))) {
+      free(af_body);
+      if (hOut != INVALID_HANDLE_VALUE) CloseHandle(hOut);
+      if (hErr != INVALID_HANDLE_VALUE) CloseHandle(hErr);
+      snprintf(err_msg, sizeof(err_msg), "No se pudo escribir jvm-args.txt.");
+      goto on_error;
+    }
+    free(af_body);
+    _snwprintf(w_cmdline, 32768, L"\"%ls\" \"@%ls\"", javaw_path, arg_file);
+  } else {
+    char* cmd_u8 = build_win32_cmdline(javaw_path, &all_args);
+    if (!cmd_u8) {
+      if (hOut != INVALID_HANDLE_VALUE) CloseHandle(hOut);
+      if (hErr != INVALID_HANDLE_VALUE) CloseHandle(hErr);
+      snprintf(err_msg, sizeof(err_msg), "Sin memoria construyendo argumentos de Java.");
+      goto on_error;
+    }
+    utf8_to_wide(cmd_u8, w_cmdline, 32768);
+    free(cmd_u8);
+  }
+
+  STARTUPINFOW si;
+  PROCESS_INFORMATION pi;
+  ZeroMemory(&si, sizeof(si));
+  ZeroMemory(&pi, sizeof(pi));
+  si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdOutput = (hOut != INVALID_HANDLE_VALUE) ? hOut : GetStdHandle(STD_OUTPUT_HANDLE);
+  si.hStdError = (hErr != INVALID_HANDLE_VALUE) ? hErr : GetStdHandle(STD_ERROR_HANDLE);
+  si.hStdInput = INVALID_HANDLE_VALUE;
+
+  BOOL created = CreateProcessW(
+      javaw_path, w_cmdline, NULL, NULL, TRUE,
+      CREATE_NO_WINDOW, NULL, instance_dir, &si, &pi);
+
+  if (hOut != INVALID_HANDLE_VALUE) CloseHandle(hOut);
+  if (hErr != INVALID_HANDLE_VALUE) CloseHandle(hErr);
+
+  if (!created) {
+    snprintf(err_msg, sizeof(err_msg), "Windows no pudo iniciar javaw.exe (código %lu).", GetLastError());
+    goto on_error;
+  }
+
+  DWORD wait_res = WaitForSingleObject(pi.hProcess, 3500);
+  if (wait_res == WAIT_OBJECT_0) {
+    DWORD exit_code = 0;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    char tail[1500] = {0};
+    read_log_tail_safe(err_log, tail, sizeof(tail));
+    if (!tail[0]) read_log_tail_safe(out_log, tail, sizeof(tail));
+    if (!tail[0]) {
+      wchar_t mc_log[MAX_PATH];
+      _snwprintf(mc_log, MAX_PATH, L"%ls\\logs\\latest.log", instance_dir);
+      read_log_tail_safe(mc_log, tail, sizeof(tail));
+    }
+    snprintf(err_msg, sizeof(err_msg), "Minecraft se cerró al iniciar (código %lu). %s",
+             (unsigned long)exit_code, tail);
+    goto on_error;
+  }
+
+  set_pan_status("running", 100, "¡Minecraft Java ejecutándose en tu PC!", "", pi.dwProcessId, mc_ver, inst_dir_utf8);
+  InterlockedExchange(&g_mc.launching, 0);
+
+  /* Wait in background for game session completion */
+  WaitForSingleObject(pi.hProcess, INFINITE);
+  {
+    DWORD exit_code = 0;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    EnterCriticalSection(&g_mc.cs);
+    int still_same = (g_mc.pid == pi.dwProcessId);
+    LeaveCriticalSection(&g_mc.cs);
+    if (still_same && !g_mc.stop_requested) {
+      set_pan_status("finished", 100, "Sesión de Minecraft Java finalizada", "", 0, NULL, NULL);
+    }
+  }
+  goto cleanup;
+
+on_error:
+  set_pan_status("error", 100, "No se pudo iniciar Minecraft Java", err_msg, 0, mc_ver, inst_dir_utf8);
+  InterlockedExchange(&g_mc.launching, 0);
+
+cleanup:
+  if (hSession) WinHttpCloseHandle(hSession);
+  pan_json_free(req_json);
+  pan_json_free(mc_json);
+  pan_json_free(asset_idx_json);
+  cpmap_free(&cp_map);
+  strlist_free(&extra_jvm);
+  strlist_free(&all_args);
+  return 0;
+}
+
+int pan_mc_start_launch(const char* req_json, size_t req_len, char* err_out, size_t err_cap) {
+  if (!req_json || req_len == 0) {
+    if (err_out) _snprintf(err_out, err_cap, "Falta configuración de lanzamiento");
+    return 0;
+  }
+
+  if (InterlockedCompareExchange(&g_mc.launching, 1, 0) != 0) {
+    /* Already preparing/downloading */
+    return 1;
+  }
+
+  char* copy = (char*)malloc(req_len + 1);
+  if (!copy) {
+    InterlockedExchange(&g_mc.launching, 0);
+    if (err_out) _snprintf(err_out, err_cap, "Sin memoria disponible");
+    return 0;
+  }
+  memcpy(copy, req_json, req_len);
+  copy[req_len] = '\0';
+
+  EnterCriticalSection(&g_mc.cs);
+  g_mc.log_count = 0;
+  free(g_mc.pending_req_json);
+  g_mc.pending_req_json = copy;
+  g_mc.pending_req_len = req_len;
+  LeaveCriticalSection(&g_mc.cs);
+
+  set_pan_status("preparing", 4, "Iniciando motor nativo de Minecraft Java...", "", 0, "", "");
+
+  HANDLE hT = CreateThread(NULL, 0, LaunchWorkerThread, NULL, 0, NULL);
+  if (!hT) {
+    InterlockedExchange(&g_mc.launching, 0);
+    if (err_out) _snprintf(err_out, err_cap, "No se pudo crear el hilo de lanzamiento");
+    return 0;
+  }
+  CloseHandle(hT);
+  return 1;
+}
+
+void pan_mc_shutdown(void) {
+  InterlockedExchange(&g_mc.stop_requested, 1);
+}

@@ -1,0 +1,33 @@
+#pragma code_page(65001)
+
+1 ICON "pan_app.ico"
+1 24 "pan_stub.manifest"
+
+1 VERSIONINFO
+FILEVERSION 2,2,0,0
+PRODUCTVERSION 2,2,0,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "0c0a04b0"
+    BEGIN
+      VALUE "CompanyName", "Pan-launcher"
+      VALUE "FileDescription", "Asistente de instalacion de Pan-launcher"
+      VALUE "FileVersion", "2.2.0.0"
+      VALUE "InternalName", "Pan-launcher-Setup"
+      VALUE "LegalCopyright", "Pan-launcher"
+      VALUE "OriginalFilename", "Pan-launcher-Setup.exe"
+      VALUE "ProductName", "Pan-launcher"
+      VALUE "ProductVersion", "2.2.0.0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0C0A, 1200
+  END
+END

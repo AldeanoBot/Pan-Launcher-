@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pan Launcher</title>
+  <meta
+    name="description"
+    content="Pan Launcher — Lanzador oficial de Minecraft Java Edition con instalaciones aisladas, modo PvP competitivo, optimización FPS, cargadores y gestión de skins."
+  >
+  <meta property="og:title" content="Pan Launcher">
+  <meta
+    property="og:description"
+    content="Pan Launcher — Lanzador oficial de Minecraft Java Edition con instalaciones aisladas, modo PvP competitivo, optimización FPS, cargadores y gestión de skins."
+  >
+  <meta property="og:type" content="website">
+  <meta name="theme-color" content="#0c0907">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+    rel="stylesheet"
+  >
+  <link rel="icon" type="image/png" href="/assets/pan-logo.png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="stylesheet" href="/styles/base.css">
+  <link rel="stylesheet" href="/styles/layout.css">
+  <link rel="stylesheet" href="/styles/components.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <img id="brand-logo" class="brand-logo" src="/assets/pan-logo.png" alt="Logo oficial de Pan Launcher">
+        <div id="brand-mark" class="brand-mark" aria-hidden="true" hidden>P</div>
+        <div class="brand-text">
+          <strong>PAN</strong>
+          <span>LAUNCHER</span>
+        </div>
+      </div>
+
+      <nav class="nav" aria-label="Navegación principal">
+        <p class="nav-label">JUEGO</p>
+        <button type="button" class="nav-item" data-view="home" aria-label="Inicio" title="Inicio">
+          <span class="nav-icon" data-icon="home"></span><span class="nav-text">Inicio</span>
+        </button>
+        <button type="button" class="nav-item" data-view="versions" aria-label="Versiones" title="Versiones">
+          <span class="nav-icon" data-icon="cube"></span><span class="nav-text">Versiones</span>
+        </button>
+        <button type="button" class="nav-item" data-view="installations" aria-label="Instalaciones" title="Instalaciones">
+          <span class="nav-icon" data-icon="layers"></span><span class="nav-text">Instalaciones</span>
+        </button>
+
+        <p class="nav-label">OPTIMIZACIÓN Y PERFIL</p>
+        <button type="button" class="nav-item" data-view="performance" aria-label="Rendimiento y PvP" title="Rendimiento y PvP">
+          <span class="nav-icon" data-icon="bolt"></span><span class="nav-text">Rendimiento y PvP</span>
+        </button>
+        <button type="button" class="nav-item" data-view="players" aria-label="Jugadores" title="Jugadores">
+          <span class="nav-icon" data-icon="user"></span><span class="nav-text">Jugadores</span>
+        </button>
+        <button type="button" class="nav-item" data-view="skins" aria-label="Skins" title="Skins">
+          <span class="nav-icon" data-icon="palette"></span><span class="nav-text">Skins</span>
+        </button>
+
+        <p class="nav-label">SISTEMA</p>
+        <button type="button" class="nav-item" data-view="settings" aria-label="Ajustes" title="Ajustes">
+          <span class="nav-icon" data-icon="gear"></span><span class="nav-text">Ajustes</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="side-chip" id="account-chip" title="Cuenta activa">
+          <span class="nav-icon" data-icon="user"></span>
+          <span class="side-chip-text">Sin sesión</span>
+        </div>
+        <div class="side-chip side-chip-accent" id="version-chip" title="Versión seleccionada">
+          <span class="nav-icon" data-icon="cube"></span>
+          <span class="side-chip-text">—</span>
+        </div>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div class="topbar-heading">
+          <span class="eyebrow">PAN LAUNCHER</span>
+          <h1 id="view-title">Inicio</h1>
+        </div>
+        <div class="topbar-status">
+          <span class="status-indicator"><span class="status-dot"></span> Sistema listo</span>
+          <span class="app-version" id="app-version">v0.1.0</span>
+        </div>
+      </header>
+
+      <main id="view-root" class="view-root" tabindex="-1"></main>
+    </div>
+  </div>
+
+  <div id="toast-root" class="toast-root" aria-live="polite"></div>
+
+  <script defer src="/js/core.js"></script>
+  <script defer src="/js/icons.js"></script>
+  <script defer src="/js/perf-engine.js"></script>
+  <script defer src="/js/web-bridge.js"></script>
+  <script defer src="/js/api.js"></script>
+  <script defer src="/js/views/home.js"></script>
+  <script defer src="/js/views/versions.js"></script>
+  <script defer src="/js/views/performance.js"></script>
+  <script defer src="/js/views/loader-common.js"></script>
+  <script defer src="/js/views/fabric.js"></script>
+  <script defer src="/js/views/forge.js"></script>
+  <script defer src="/js/views/mods.js"></script>
+  <script defer src="/js/views/new-install.js"></script>
+  <script defer src="/js/views/installations.js"></script>
+  <script defer src="/js/views/folders.js"></script>
+  <script defer src="/js/skin-preview.js"></script>
+  <script defer src="/js/views/skins.js"></script>
+  <script defer src="/js/views/ram.js"></script>
+  <script defer src="/js/views/java.js"></script>
+  <script defer src="/js/views/accounts.js"></script>
+  <script defer src="/js/views/players.js"></script>
+  <script defer src="/js/views/settings.js"></script>
+  <script defer src="/js/router.js"></script>
+  <script defer src="/js/app.js"></script>
+</body>
+</html>

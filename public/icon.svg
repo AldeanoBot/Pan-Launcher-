@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#0B0D10"/>
+  <rect x="24" y="24" width="464" height="464" rx="76" fill="#12161C" stroke="#1E242E" stroke-width="8"/>
+  <!-- Isometric Emerald Voxel Cube -->
+  <polygon points="256,104 392,182 256,260 120,182" fill="#34D399"/>
+  <polygon points="120,182 256,260 256,408 120,330" fill="#10B981"/>
+  <polygon points="392,182 256,260 256,408 392,330" fill="#059669"/>
+  <polygon points="256,138 344,188 256,238 168,188" fill="#6EE7B7" opacity="0.55"/>
+</svg>

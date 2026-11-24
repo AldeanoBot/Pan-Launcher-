@@ -1,0 +1,288 @@
+(function () {
+  'use strict';
+
+  const Nexus = (window.Nexus = window.Nexus || {});
+  const { escapeHtml, formatRam, note, pageHead } = Nexus.utils;
+
+  Nexus.views = Nexus.views || {};
+
+  const STATUS_LABELS = Object.freeze({
+    idle: 'Listo',
+    preparing: 'Preparando',
+    starting: 'Iniciando',
+    playing: 'Jugando',
+    stopping: 'Cerrando',
+    error: 'Error'
+  });
+
+  function statusLabel(value) {
+    return STATUS_LABELS[value] || 'Listo';
+  }
+
+  Nexus.views.canPlay = function (state) {
+    const launch = state.launch || {};
+    const preflight = launch.preflight || {};
+    return Boolean(preflight.ready) &&
+      !(launch.status && launch.status.active) &&
+      !launch.starting &&
+      !(state.install && state.install.active);
+  };
+
+  function diagnosticPanel(status) {
+    const diagnostic = status && status.diagnostic;
+    if (!diagnostic || !diagnostic.probableCause) return '';
+    const cause = diagnostic.probableCause;
+    const java = diagnostic.java || {};
+    const ram = diagnostic.ram || {};
+    const latest = diagnostic.latestLog || {};
+    const reports = Array.isArray(diagnostic.crashReports) ? diagnostic.crashReports : [];
+    const consoleTail = Array.isArray(diagnostic.consoleTail) ? diagnostic.consoleTail : [];
+    const head = [
+      diagnostic.versionId ? `Versión ${diagnostic.versionId}` : null,
+      diagnostic.loader && diagnostic.loader !== 'vanilla'
+        ? `${diagnostic.loader}${diagnostic.loaderVersion ? ` ${diagnostic.loaderVersion}` : ''}` : null,
+      java.major ? `Java ${java.major}${java.requiredMajor ? ` (requerido ${java.requiredMajor})` : ''}` : null,
+      diagnostic.exitCode !== null && diagnostic.exitCode !== undefined
+        ? `Código ${diagnostic.exitCode}${diagnostic.signal ? ` · señal ${diagnostic.signal}` : ''}` : null
+    ].filter(Boolean);
+
+    return `
+      <details class="diagnostic-panel" id="launch-diagnostic">
+        <summary>
+          <span class="badge badge-error">${escapeHtml(cause.category || 'diagnóstico')}</span>
+          ${escapeHtml(cause.message || 'Diagnóstico del último lanzamiento')}
+        </summary>
+        <div class="diagnostic-body">
+          <p class="diagnostic-hint">${escapeHtml(cause.hint || '')}</p>
+          ${head.length ? `<p class="diagnostic-meta">${head.map(escapeHtml).join(' · ')}</p>` : ''}
+          ${ram.maxMb ? `<p class="diagnostic-meta">RAM: ${formatRam(ram.minMb)} – ${formatRam(ram.maxMb)}</p>` : ''}
+          ${latest.path ? `<p class="diagnostic-path">Último registro: <code>${escapeHtml(latest.path)}</code></p>` : ''}
+          ${consoleTail.length ? `
+            <details class="diagnostic-details">
+              <summary>Consola del lanzamiento (${consoleTail.length} líneas)</summary>
+              <pre>${escapeHtml(consoleTail.map((line) => line && line.text).filter(Boolean).join('\n'))}</pre>
+            </details>` : ''}
+          ${latest.tail ? `
+            <details class="diagnostic-details">
+              <summary>Cola de latest.log</summary>
+              <pre>${escapeHtml(latest.tail)}</pre>
+            </details>` : ''}
+          ${reports.map((report) => `
+            <details class="diagnostic-details">
+              <summary>Informe: ${escapeHtml(String(report.path).split(/[\\/]/).pop())}</summary>
+              <pre>${escapeHtml(report.tail || '')}</pre>
+            </details>`).join('')}
+        </div>
+      </details>`;
+  }
+
+  const CLOSE_BEHAVIOR_META = Object.freeze({
+    quit: { label: 'Cerrar launcher al jugar', short: 'Cerrar al iniciar', icon: 'power' },
+    minimize: { label: 'Minimizar al jugar', short: 'Minimizar al iniciar', icon: 'layers' },
+    keep: { label: 'Mantener abierto al jugar', short: 'Mantener abierto', icon: 'shield' }
+  });
+
+  function closeBehaviorMeta(value) {
+    return CLOSE_BEHAVIOR_META[value] || CLOSE_BEHAVIOR_META.quit;
+  }
+
+  Nexus.views.launchPanel = function (state) {
+    const launch = state.launch || {};
+    const status = launch.status || {};
+    const preflight = launch.preflight || {};
+    const active = status.active || null;
+    const phase = status.status || 'idle';
+    const reasons = Array.isArray(preflight.reasons) ? preflight.reasons : [];
+    const versionId = active ? active.versionId : (status.versionId || state.config.launch.versionId);
+    const perfEval = Nexus.perfEngine ? Nexus.perfEngine.evaluateFromConfig(state.config) : null;
+    const closeMeta = closeBehaviorMeta(state.config && state.config.general && state.config.general.closeBehavior);
+
+    const diagnostic = status.diagnostic || null;
+    let summary;
+    if (phase === 'error') {
+      summary = diagnostic && diagnostic.probableCause
+        ? escapeHtml(diagnostic.probableCause.message)
+        : escapeHtml(status.error || 'Error desconocido al lanzar Minecraft.');
+    } else if (phase === 'playing' && active) {
+      summary = `Minecraft ${escapeHtml(active.versionId)} en ejecución (PID ${escapeHtml(String(active.pid || '—'))}).`;
+    } else if (active) {
+      summary = `${statusLabel(phase)} ${escapeHtml(versionId)}…`;
+    } else if (reasons.length) {
+      summary = reasons[0].code === 'auth'
+        ? reasons[0].message
+        : 'Revisa los requisitos para activar el botón JUGAR superior.';
+    } else {
+      summary = 'Todo listo. Pulsa JUGAR arriba para iniciar Minecraft.';
+    }
+
+    return `
+      <section class="panel launch-panel" id="launch-panel-inner" data-phase="${escapeHtml(phase)}">
+        <div class="panel-head">
+          <div>
+            <h3>Sesión de juego</h3>
+            <p>${summary}</p>
+          </div>
+          <span class="badge badge-launch badge-${escapeHtml(phase)}">${escapeHtml(statusLabel(phase))}</span>
+        </div>
+
+        <div class="launch-meta tabular">
+          <span><strong>Versión:</strong> ${escapeHtml(versionId)}</span>
+          <span><strong>Modo cuenta:</strong> ${active && active.mode ? escapeHtml(active.mode === 'offline' ? 'Offline' : 'Online') : escapeHtml(state.session && state.session.mode === 'offline' ? 'Offline' : 'Online')}</span>
+          ${perfEval ? `<span><strong>Perfil:</strong> ${escapeHtml(perfEval.presetName)} (${escapeHtml(perfEval.jvm.gc)})</span>` : ''}
+          <span><strong>Al iniciar juego:</strong> ${escapeHtml(closeMeta.short)}</span>
+          ${active ? `<span><strong>Java:</strong> ${escapeHtml(String(active.javaMajor || '—'))}</span>
+          <span><strong>RAM:</strong> ${escapeHtml(formatRam(active.ramMb || state.config.launch.ramMb))}</span>
+          <span><strong>PID:</strong> ${escapeHtml(String(active.pid || '—'))}</span>` : ''}
+        </div>
+
+        ${reasons.length && phase === 'idle' ? `
+          <ul class="launch-requirements">
+            ${reasons.map((reason) => `<li data-reason="${escapeHtml(reason.code)}">${escapeHtml(reason.message)}</li>`).join('')}
+          </ul>` : ''}
+
+        ${active || reasons.length || phase === 'error' ? `
+          <div class="launch-actions">
+            ${active ? `<button type="button" class="btn btn-danger btn-sm" data-action="stop-game">
+              <span data-icon="stop"></span> Cerrar Minecraft
+            </button>` : ''}
+            <button type="button" class="btn btn-sm" data-action="refresh-preflight">Comprobar requisitos</button>
+          </div>` : ''}
+
+        ${!active ? diagnosticPanel(status) : ''}
+      </section>`;
+  };
+
+  Nexus.views.home = function (state) {
+    const config = state.config;
+    const selected = state.versions.find((item) => item.id === config.launch.versionId) || state.versions[0];
+    const version = selected ? selected.id : (config.launch.versionId || '—');
+    const ram = formatRam(config.launch.ramMb);
+    const auth = state.auth || {};
+    const sessionState = state.session || { mode: 'online', profile: null };
+    const mode = sessionState.mode === 'offline' ? 'Offline' : 'Online';
+    const profile = sessionState.profile || auth.profile;
+    const account = profile
+      ? `${profile.name} · ${mode}`
+      : auth.canRestore ? `Sesión guardada · ${mode}` : `Sin sesión · ${mode}`;
+    const installed = (state.installed || []).includes(version);
+    const versionLabel = installed ? 'Versión instalada' : 'Versión activa';
+    const launch = state.launch || {};
+    const preflight = launch.preflight || {};
+    const logo = state.logo || null;
+    const logoUrl = (logo && logo.available && logo.dataUrl) || '/assets/pan-logo.png';
+    const perfEval = Nexus.perfEngine ? Nexus.perfEngine.evaluateFromConfig(config) : null;
+    const presets = Nexus.perfEngine ? Object.values(Nexus.perfEngine.PRESETS) : [];
+    const closeBehavior = (config.general && config.general.closeBehavior) || 'quit';
+    const closeMeta = closeBehaviorMeta(closeBehavior);
+
+    return `
+      <div class="page">
+        <section class="hero">
+          <div class="hero-copy">
+            <span class="pill"><span class="pill-dot"></span> LANZAMIENTO REAL · INSTALACIONES AISLADAS</span>
+            <h2>Tu mundo empieza aquí.</h2>
+            <p class="muted">Instala Minecraft Java desde servidores oficiales, exprime tus FPS con modo PvP o Ultra FPS y elige cuenta Microsoft o perfil local.</p>
+            <div class="hero-actions">
+              <button type="button" class="btn btn-primary btn-lg" data-action="play"
+                      ${Nexus.views.canPlay(state) ? '' : 'disabled'}>
+                <span data-icon="play"></span> JUGAR
+              </button>
+              <button type="button" class="btn btn-ghost btn-lg" data-action="navigate" data-view="versions">
+                Elegir versión <span data-icon="arrow"></span>
+              </button>
+              <button type="button"
+                      class="btn btn-sm hero-close-toggle${closeBehavior === 'quit' ? ' active' : ''}"
+                      data-action="cycle-close-behavior"
+                      aria-pressed="${closeBehavior === 'quit'}"
+                      title="Estilo SKLauncher: alterna si Pan Launcher se cierra, minimiza o permanece abierto al iniciar Minecraft">
+                <span data-icon="${escapeHtml(closeMeta.icon)}"></span>
+                <span>${escapeHtml(closeMeta.label)}</span>
+              </button>
+            </div>
+            <p class="field-hint">${installed ? 'Versión instalada y verificada. ' : 'Instala una versión desde Versiones. '}${preflight.ready ? 'Sesión, Java y RAM comprobados.' : 'JUGAR se activa cuando se cumplen todos los requisitos.'}</p>
+          </div>
+          <div class="hero-art" aria-hidden="true">
+            <div class="orb orb-one"></div>
+            <div class="orb orb-two"></div>
+            <div class="hero-sparks"></div>
+            <img class="art-logo" src="${escapeHtml(logoUrl)}" alt="">
+          </div>
+        </section>
+
+        <section class="stats-grid" aria-label="Estado del launcher">
+          <article class="stat-card">
+            <div class="stat-icon"><span data-icon="cube"></span></div>
+            <div>
+              <div class="stat-label">${escapeHtml(versionLabel)}</div>
+              <div class="stat-value tabular">${escapeHtml(version)}</div>
+            </div>
+          </article>
+          <article class="stat-card">
+            <div class="stat-icon"><span data-icon="bolt"></span></div>
+            <div>
+              <div class="stat-label">Rendimiento</div>
+              <div class="stat-value tabular">${perfEval ? `${escapeHtml(perfEval.presetName)} · ~${escapeHtml(String(perfEval.estimate.estimatedFps))} FPS` : 'Estándar'}</div>
+            </div>
+          </article>
+          <article class="stat-card">
+            <div class="stat-icon"><span data-icon="ram"></span></div>
+            <div>
+              <div class="stat-label">Memoria y GC</div>
+              <div class="stat-value tabular">${escapeHtml(ram)}${perfEval ? ` · ${escapeHtml(perfEval.jvm.gc)}` : ''}</div>
+            </div>
+          </article>
+          <article class="stat-card">
+            <div class="stat-icon"><span data-icon="user"></span></div>
+            <div>
+              <div class="stat-label">Cuenta</div>
+              <div class="stat-value">${escapeHtml(account)}</div>
+            </div>
+          </article>
+        </section>
+
+        <div id="launch-panel">${Nexus.views.launchPanel(state)}</div>
+
+        <section class="two-columns">
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>Modo de rendimiento rápido</h3>
+                <p>Elige si quieres modo PvP, Ultra FPS, Survival o Vanilla.</p>
+              </div>
+              <button type="button" class="btn btn-xs" data-action="navigate" data-view="performance">
+                Ajustar detalles <span data-icon="arrow"></span>
+              </button>
+            </div>
+            <div class="preset-row">
+              ${presets.map((preset) => {
+                const active = perfEval && perfEval.presetId === preset.id;
+                return `
+                  <button type="button" class="btn btn-sm ${active ? 'btn-primary' : ''}"
+                          data-action="perf-apply-preset" data-preset="${escapeHtml(preset.id)}">
+                    ${escapeHtml(preset.name)}
+                  </button>`;
+              }).join('')}
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>Accesos rápidos</h3>
+                <p>Configura versiones, jugadores y hardware en un clic.</p>
+              </div>
+            </div>
+            <div class="preset-row">
+              <button type="button" class="btn btn-sm" data-action="navigate" data-view="installations">Instalaciones</button>
+              <button type="button" class="btn btn-sm" data-action="navigate" data-view="ram">Memoria RAM</button>
+              <button type="button" class="btn btn-sm" data-action="navigate" data-view="java">Java</button>
+              <button type="button" class="btn btn-sm" data-action="navigate" data-view="players">Modo y jugadores</button>
+              <button type="button" class="btn btn-sm" data-action="navigate" data-view="skins">Skins 3D</button>
+            </div>
+          </div>
+        </section>
+
+        ${note(`Modo ${mode}: ${profile ? escapeHtml(profile.name) : 'sin jugador activo'}. Las versiones se descargan de servidores oficiales de Mojang y se verifican por SHA1.`)}
+      </div>`;
+  };
+})();
