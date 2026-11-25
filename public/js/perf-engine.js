@@ -597,7 +597,6 @@
       `enableVsync:${video.vsync ? 'true' : 'false'}`,
       `biomeBlendRadius:${video.biomeBlend}`,
       `entityDistanceScaling:${(video.entityDistanceScaling / 100).toFixed(2)}`,
-      `guiScale:${video.guiScale}`,
       `gamma:${video.fullbright ? '10.0' : '1.0'}`,
       `bobView:${video.viewBobbing === false ? 'false' : 'true'}`,
       `mipmapLevels:${video.mipmapZero ? 0 : 4}`,
@@ -611,7 +610,15 @@
             'darknessEffectScale:0.0',
             'damageTiltStrength:0.0'
           ]
-        : []),
+        : [
+            'menuBackgroundBlurriness:5',
+            'glintSpeed:0.5',
+            'glintStrength:0.75',
+            'screenEffectScale:1.0',
+            'fovEffectScale:1.0',
+            'darknessEffectScale:1.0',
+            'damageTiltStrength:1.0'
+          ]),
       `rawMouseInput:${video.rawMouseInput !== false ? 'true' : 'false'}`,
       `skipMultiplayerWarning:true`,
       `snooperEnabled:${network && network.disableTelemetry ? 'false' : 'true'}`

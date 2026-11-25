@@ -100,6 +100,12 @@ test('buildWindowsSelfContainedBat embeds run.ps1, server.ps1, launch.ps1 and zi
   assert.doesNotMatch(launchPs1, /UseCompactObjectHeaders/);
   assert.doesNotMatch(launchPs1, /DisableExplicitGC/);
   assert.match(launchPs1, /Merge-OptionsTxt/);
+  assert.match(launchPs1, /Bootstrap-SharedState/);
+  assert.match(launchPs1, /Sync-SharedFileNewest/);
+  assert.match(launchPs1, /Link-SharedDirectory/);
+  assert.match(launchPs1, /Sync-InstanceBackToShared/);
+  assert.match(launchPs1, /servers\.dat/);
+  assert.match(launchPs1, /screenshots/);
   assert.match(launchPs1, /Open-PanUiWindow/);
   assert.match(launchPs1, /javaw\.exe/);
   assert.match(launchPs1, /--quickPlayMultiplayer/);
@@ -141,6 +147,12 @@ test('buildUnixSelfContainedSh embeds valid Python 3 Minecraft Java backend and 
   assert.doesNotMatch(serverPy, /UseCompactObjectHeaders/);
   assert.doesNotMatch(serverPy, /DisableExplicitGC/);
   assert.match(serverPy, /merge_options_txt/);
+  assert.match(serverPy, /bootstrap_shared_state/);
+  assert.match(serverPy, /sync_shared_file_newest/);
+  assert.match(serverPy, /link_shared_dir/);
+  assert.match(serverPy, /sync_instance_back_to_shared/);
+  assert.match(serverPy, /servers\.dat/);
+  assert.match(serverPy, /screenshots/);
   assert.match(serverPy, /open_launcher_ui/);
   assert.match(serverPy, /watch_mc_exit/);
   assert.match(serverPy, /find_crash_tail/);

@@ -356,6 +356,294 @@ static int write_entire_file_w(const wchar_t* path, const void* data, size_t len
 }
 
 /* =========================================================================
+ * Shared Player State Persistence (across all versions, loaders & modes)
+ * ========================================================================= */
+
+static uint64_t file_mtime_u64_w(const wchar_t* path) {
+  WIN32_FILE_ATTRIBUTE_DATA fad;
+  if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fad)) return 0;
+  if (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return 0;
+  if (fad.nFileSizeHigh == 0 && fad.nFileSizeLow == 0) return 0;
+  return (((uint64_t)fad.ftLastWriteTime.dwHighDateTime) << 32) |
+         (uint64_t)fad.ftLastWriteTime.dwLowDateTime;
+}
+
+static int is_reparse_dir_w(const wchar_t* path) {
+  DWORD attr = GetFileAttributesW(path);
+  if (attr == INVALID_FILE_ATTRIBUTES) return 0;
+  return (attr & FILE_ATTRIBUTE_DIRECTORY) && (attr & FILE_ATTRIBUTE_REPARSE_POINT);
+}
+
+static int is_regular_dir_w(const wchar_t* path) {
+  DWORD attr = GetFileAttributesW(path);
+  if (attr == INVALID_FILE_ATTRIBUTES) return 0;
+  return (attr & FILE_ATTRIBUTE_DIRECTORY) && !(attr & FILE_ATTRIBUTE_REPARSE_POINT);
+}
+
+static int copy_file_w_safe(const wchar_t* src, const wchar_t* dst) {
+  if (!file_exists_nonempty_w(src)) return 0;
+  ensure_parent_dir_w(dst);
+  return CopyFileW(src, dst, FALSE) ? 1 : 0;
+}
+
+static void sync_shared_file_newest_w(const wchar_t* shared_file, const wchar_t* inst_file) {
+  uint64_t s_mt = file_mtime_u64_w(shared_file);
+  uint64_t i_mt = file_mtime_u64_w(inst_file);
+  if (s_mt == 0 && i_mt == 0) return;
+  if (s_mt > i_mt) {
+    copy_file_w_safe(shared_file, inst_file);
+  } else if (i_mt > s_mt) {
+    copy_file_w_safe(inst_file, shared_file);
+  }
+}
+
+static int dir_has_entries_w(const wchar_t* dir) {
+  wchar_t search[MAX_PATH];
+  _snwprintf(search, MAX_PATH, L"%ls\\*", dir);
+  search[MAX_PATH - 1] = L'\0';
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW(search, &fd);
+  if (h == INVALID_HANDLE_VALUE) return 0;
+  int found = 0;
+  do {
+    if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+    found = 1;
+    break;
+  } while (FindNextFileW(h, &fd));
+  FindClose(h);
+  return found;
+}
+
+static void sync_dir_recursive_newer_w(const wchar_t* src_dir, const wchar_t* dst_dir) {
+  if (!is_regular_dir_w(src_dir)) return;
+  ensure_dir_w(dst_dir);
+  wchar_t search[MAX_PATH];
+  _snwprintf(search, MAX_PATH, L"%ls\\*", src_dir);
+  search[MAX_PATH - 1] = L'\0';
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW(search, &fd);
+  if (h == INVALID_HANDLE_VALUE) return;
+  do {
+    if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+    if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+    wchar_t s_sub[MAX_PATH], d_sub[MAX_PATH];
+    _snwprintf(s_sub, MAX_PATH, L"%ls\\%ls", src_dir, fd.cFileName);
+    _snwprintf(d_sub, MAX_PATH, L"%ls\\%ls", dst_dir, fd.cFileName);
+    s_sub[MAX_PATH - 1] = L'\0';
+    d_sub[MAX_PATH - 1] = L'\0';
+    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+      sync_dir_recursive_newer_w(s_sub, d_sub);
+    } else {
+      uint64_t s_mt = file_mtime_u64_w(s_sub);
+      uint64_t d_mt = file_mtime_u64_w(d_sub);
+      if (s_mt > d_mt) {
+        copy_file_w_safe(s_sub, d_sub);
+      }
+    }
+  } while (FindNextFileW(h, &fd));
+  FindClose(h);
+}
+
+static void remove_regular_dir_tree_w(const wchar_t* dir) {
+  if (is_reparse_dir_w(dir)) {
+    RemoveDirectoryW(dir);
+    return;
+  }
+  if (!is_regular_dir_w(dir)) return;
+  wchar_t search[MAX_PATH];
+  _snwprintf(search, MAX_PATH, L"%ls\\*", dir);
+  search[MAX_PATH - 1] = L'\0';
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW(search, &fd);
+  if (h != INVALID_HANDLE_VALUE) {
+    do {
+      if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+      wchar_t sub[MAX_PATH];
+      _snwprintf(sub, MAX_PATH, L"%ls\\%ls", dir, fd.cFileName);
+      sub[MAX_PATH - 1] = L'\0';
+      if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+        RemoveDirectoryW(sub);
+      } else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        remove_regular_dir_tree_w(sub);
+      } else {
+        SetFileAttributesW(sub, FILE_ATTRIBUTE_NORMAL);
+        DeleteFileW(sub);
+      }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+  }
+  RemoveDirectoryW(dir);
+}
+
+static int create_dir_junction_w(const wchar_t* link_dir, const wchar_t* target_dir) {
+  wchar_t comspec[MAX_PATH] = L"cmd.exe";
+  DWORD n = GetEnvironmentVariableW(L"ComSpec", comspec, MAX_PATH);
+  if (n == 0 || n >= MAX_PATH) wcscpy(comspec, L"cmd.exe");
+
+  wchar_t cmdline[MAX_PATH * 3];
+  _snwprintf(cmdline, MAX_PATH * 3, L"\"%ls\" /c mklink /J \"%ls\" \"%ls\"",
+             comspec, link_dir, target_dir);
+  cmdline[MAX_PATH * 3 - 1] = L'\0';
+
+  STARTUPINFOW si;
+  PROCESS_INFORMATION pi;
+  ZeroMemory(&si, sizeof(si));
+  ZeroMemory(&pi, sizeof(pi));
+  si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESHOWWINDOW;
+  si.wShowWindow = SW_HIDE;
+
+  if (!CreateProcessW(NULL, cmdline, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+    return 0;
+  }
+  WaitForSingleObject(pi.hProcess, 5000);
+  CloseHandle(pi.hThread);
+  CloseHandle(pi.hProcess);
+  return is_reparse_dir_w(link_dir);
+}
+
+static void migrate_and_link_dir_w(const wchar_t* inst_sub, const wchar_t* shared_sub) {
+  ensure_dir_w(shared_sub);
+  if (is_reparse_dir_w(inst_sub)) {
+    return;
+  }
+  if (is_regular_dir_w(inst_sub)) {
+    sync_dir_recursive_newer_w(inst_sub, shared_sub);
+    remove_regular_dir_tree_w(inst_sub);
+  }
+  if (!create_dir_junction_w(inst_sub, shared_sub)) {
+    ensure_dir_w(inst_sub);
+    sync_dir_recursive_newer_w(shared_sub, inst_sub);
+  }
+}
+
+static void bootstrap_shared_from_instances_w(const wchar_t* base_dir, const wchar_t* shared_dir) {
+  static const wchar_t* kSharedDirs[] = {L"saves", L"resourcepacks", L"shaderpacks", L"screenshots"};
+  static const wchar_t* kSharedFiles[] = {L"servers.dat", L"servers.dat_old", L"optionsof.txt", L"options.txt"};
+
+  ensure_dir_w(shared_dir);
+  for (int i = 0; i < 4; i++) {
+    wchar_t sd[MAX_PATH];
+    _snwprintf(sd, MAX_PATH, L"%ls\\%ls", shared_dir, kSharedDirs[i]);
+    ensure_dir_w(sd);
+  }
+
+  wchar_t inst_root[MAX_PATH], search[MAX_PATH];
+  _snwprintf(inst_root, MAX_PATH, L"%ls\\instances", base_dir);
+  _snwprintf(search, MAX_PATH, L"%ls\\*", inst_root);
+  search[MAX_PATH - 1] = L'\0';
+
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW(search, &fd);
+  if (h == INVALID_HANDLE_VALUE) return;
+
+  uint64_t best_mt[4];
+  wchar_t best_path[4][MAX_PATH];
+  for (int f = 0; f < 4; f++) {
+    wchar_t sf[MAX_PATH];
+    _snwprintf(sf, MAX_PATH, L"%ls\\%ls", shared_dir, kSharedFiles[f]);
+    best_mt[f] = file_mtime_u64_w(sf);
+    best_path[f][0] = L'\0';
+  }
+  int dir_empty[4];
+  for (int d = 0; d < 4; d++) {
+    wchar_t sd[MAX_PATH];
+    _snwprintf(sd, MAX_PATH, L"%ls\\%ls", shared_dir, kSharedDirs[d]);
+    dir_empty[d] = !dir_has_entries_w(sd);
+  }
+
+  do {
+    if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+    if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+    wchar_t idir[MAX_PATH];
+    _snwprintf(idir, MAX_PATH, L"%ls\\%ls", inst_root, fd.cFileName);
+    idir[MAX_PATH - 1] = L'\0';
+
+    for (int f = 0; f < 4; f++) {
+      /* For options.txt only bootstrap when shared/options.txt does not exist yet */
+      if (f == 3 && best_mt[3] > 0 && best_path[3][0] == L'\0') continue;
+      wchar_t cand[MAX_PATH];
+      _snwprintf(cand, MAX_PATH, L"%ls\\%ls", idir, kSharedFiles[f]);
+      uint64_t mt = file_mtime_u64_w(cand);
+      if (mt > best_mt[f]) {
+        best_mt[f] = mt;
+        wcsncpy(best_path[f], cand, MAX_PATH - 1);
+        best_path[f][MAX_PATH - 1] = L'\0';
+      }
+    }
+
+    for (int d = 0; d < 4; d++) {
+      if (!dir_empty[d]) continue;
+      wchar_t isub[MAX_PATH], ssub[MAX_PATH];
+      _snwprintf(isub, MAX_PATH, L"%ls\\%ls", idir, kSharedDirs[d]);
+      _snwprintf(ssub, MAX_PATH, L"%ls\\%ls", shared_dir, kSharedDirs[d]);
+      if (is_regular_dir_w(isub)) {
+        sync_dir_recursive_newer_w(isub, ssub);
+      }
+    }
+  } while (FindNextFileW(h, &fd));
+  FindClose(h);
+
+  for (int f = 0; f < 4; f++) {
+    if (best_path[f][0]) {
+      wchar_t sf[MAX_PATH];
+      _snwprintf(sf, MAX_PATH, L"%ls\\%ls", shared_dir, kSharedFiles[f]);
+      copy_file_w_safe(best_path[f], sf);
+    }
+  }
+}
+
+static void sync_mc_state_to_instance_w(const wchar_t* base_dir, const wchar_t* instance_dir, wchar_t shared_dir_out[MAX_PATH]) {
+  static const wchar_t* kSharedDirs[] = {L"saves", L"resourcepacks", L"shaderpacks", L"screenshots"};
+  static const wchar_t* kSharedFiles[] = {L"servers.dat", L"servers.dat_old", L"optionsof.txt", L"options.txt"};
+
+  _snwprintf(shared_dir_out, MAX_PATH, L"%ls\\shared", base_dir);
+  shared_dir_out[MAX_PATH - 1] = L'\0';
+
+  bootstrap_shared_from_instances_w(base_dir, shared_dir_out);
+
+  for (int d = 0; d < 4; d++) {
+    wchar_t isub[MAX_PATH], ssub[MAX_PATH];
+    _snwprintf(isub, MAX_PATH, L"%ls\\%ls", instance_dir, kSharedDirs[d]);
+    _snwprintf(ssub, MAX_PATH, L"%ls\\%ls", shared_dir_out, kSharedDirs[d]);
+    migrate_and_link_dir_w(isub, ssub);
+  }
+
+  for (int f = 0; f < 4; f++) {
+    wchar_t sf[MAX_PATH], inf[MAX_PATH];
+    _snwprintf(sf, MAX_PATH, L"%ls\\%ls", shared_dir_out, kSharedFiles[f]);
+    _snwprintf(inf, MAX_PATH, L"%ls\\%ls", instance_dir, kSharedFiles[f]);
+    sync_shared_file_newest_w(sf, inf);
+  }
+}
+
+static void sync_mc_state_back_w(const wchar_t* instance_dir, const wchar_t* shared_dir) {
+  if (!instance_dir || !instance_dir[0] || !shared_dir || !shared_dir[0]) return;
+  static const wchar_t* kSharedDirs[] = {L"saves", L"resourcepacks", L"shaderpacks", L"screenshots"};
+  static const wchar_t* kSharedFiles[] = {L"servers.dat", L"servers.dat_old", L"optionsof.txt", L"options.txt"};
+
+  ensure_dir_w(shared_dir);
+  for (int f = 0; f < 4; f++) {
+    wchar_t sf[MAX_PATH], inf[MAX_PATH];
+    _snwprintf(sf, MAX_PATH, L"%ls\\%ls", shared_dir, kSharedFiles[f]);
+    _snwprintf(inf, MAX_PATH, L"%ls\\%ls", instance_dir, kSharedFiles[f]);
+    uint64_t i_mt = file_mtime_u64_w(inf);
+    uint64_t s_mt = file_mtime_u64_w(sf);
+    if (i_mt > 0 && i_mt >= s_mt) {
+      copy_file_w_safe(inf, sf);
+    }
+  }
+  for (int d = 0; d < 4; d++) {
+    wchar_t isub[MAX_PATH], ssub[MAX_PATH];
+    _snwprintf(isub, MAX_PATH, L"%ls\\%ls", instance_dir, kSharedDirs[d]);
+    _snwprintf(ssub, MAX_PATH, L"%ls\\%ls", shared_dir, kSharedDirs[d]);
+    if (is_regular_dir_w(isub)) {
+      sync_dir_recursive_newer_w(isub, ssub);
+    }
+  }
+}
+
+/* =========================================================================
  * BCrypt SHA-1 & MD5
  * ========================================================================= */
 
@@ -1908,13 +2196,11 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
     _snwprintf(subnat, MAX_PATH, L"%ls\\lwjgl", natives_dir); ensure_dir_w(subnat);
     _snwprintf(subnat, MAX_PATH, L"%ls\\netty", natives_dir); ensure_dir_w(subnat);
     _snwprintf(subnat, MAX_PATH, L"%ls\\server-resource-packs", instance_dir); ensure_dir_w(subnat);
-    _snwprintf(subnat, MAX_PATH, L"%ls\\resourcepacks", instance_dir); ensure_dir_w(subnat);
     _snwprintf(subnat, MAX_PATH, L"%ls\\downloads", instance_dir); ensure_dir_w(subnat);
-    _snwprintf(subnat, MAX_PATH, L"%ls\\saves", instance_dir); ensure_dir_w(subnat);
-    _snwprintf(subnat, MAX_PATH, L"%ls\\shaderpacks", instance_dir); ensure_dir_w(subnat);
     _snwprintf(subnat, MAX_PATH, L"%ls\\logs", instance_dir); ensure_dir_w(subnat);
     _snwprintf(subnat, MAX_PATH, L"%ls\\crash-reports", instance_dir); ensure_dir_w(subnat);
   }
+  wchar_t shared_dir[MAX_PATH] = {0};
   ensure_dir_w(mods_dir);
   wide_to_utf8(instance_dir, inst_dir_utf8, sizeof(inst_dir_utf8));
 
@@ -2642,7 +2928,8 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
     }
   }
 
-  /* 8. Merge managed options into options.txt (preserving user keybinds, resourcePacks & server settings) */
+  /* 8. Sync shared player profile (servers, language, controls, worlds, resourcepacks) then merge video presets */
+  sync_mc_state_to_instance_w(g_mc.base_dir, instance_dir, shared_dir);
   {
     const char* opt_txt = pan_json_str(pan_json_get(req_json, "optionsTxt"), NULL);
     if (opt_txt && opt_txt[0]) {
@@ -2999,6 +3286,7 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
     GetExitCodeProcess(pi.hProcess, &exit_code);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
+    sync_mc_state_back_w(instance_dir, shared_dir);
 
     char tail[1500] = {0};
     read_log_tail_safe(err_log, tail, sizeof(tail));
@@ -3022,6 +3310,7 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
 
   /* Wait in background for game session completion */
   WaitForSingleObject(pi.hProcess, INFINITE);
+  sync_mc_state_back_w(instance_dir, shared_dir);
   {
     DWORD exit_code = 0;
     GetExitCodeProcess(pi.hProcess, &exit_code);

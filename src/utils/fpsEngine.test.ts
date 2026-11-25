@@ -133,12 +133,16 @@ test('generateJvmArgs omits -XX:+ZGenerational and -XX:+UseCompactObjectHeaders 
   assert.ok(args112.includes('-XX:+AlwaysPreTouch'));
 });
 
-test('generateOptionsTxt outputs valid Minecraft options keys including extreme Ultra FPS flags', () => {
+test('generateOptionsTxt outputs valid Minecraft options keys, preserves guiScale, and toggles Ultra FPS flags', () => {
   const txt = generateOptionsTxt(sampleVideo, sampleNetwork);
   assert.match(txt, /renderDistance:8/);
   assert.match(txt, /ao:false/);
   assert.match(txt, /entityShadows:false/);
   assert.match(txt, /snooperEnabled:false/);
+  assert.doesNotMatch(txt, /^guiScale:/m);
+  assert.match(txt, /menuBackgroundBlurriness:5/);
+  assert.match(txt, /glintSpeed:0\.5/);
+  assert.match(txt, /fovEffectScale:1\.0/);
 
   const extremeTxt = generateOptionsTxt(
     {
@@ -159,6 +163,7 @@ test('generateOptionsTxt outputs valid Minecraft options keys including extreme 
   assert.match(extremeTxt, /menuBackgroundBlurriness:0/);
   assert.match(extremeTxt, /glintSpeed:0\.0/);
   assert.match(extremeTxt, /fovEffectScale:0\.0/);
+  assert.doesNotMatch(extremeTxt, /^guiScale:/m);
 });
 
 test('generateWindowsInstallerPs1 and generateUnixInstallerSh write options.txt and download resolved mods', () => {
