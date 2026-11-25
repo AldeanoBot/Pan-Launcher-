@@ -18,6 +18,8 @@
       minRamMb: 512,
       javaPath: '',
       versionId: '1.21.4',
+      loader: 'vanilla',
+      loaderVersion: null,
       activeInstallationId: null
     },
     account: {
@@ -38,11 +40,11 @@
       hardwareTier: 'auto',
       exportLoader: 'Fabric',
       gc: 'ZGC',
-      alwaysPreTouch: true,
+      alwaysPreTouch: false,
       stringDeduplication: false,
       parallelThreads: 4,
-      renderDistance: 8,
-      simulationDistance: 6,
+      renderDistance: 5,
+      simulationDistance: 5,
       maxFps: 260,
       graphicsMode: 'fast',
       smoothLighting: false,
@@ -50,21 +52,22 @@
       particles: 'minimal',
       clouds: 'off',
       vsync: false,
-      biomeBlend: 1,
-      entityDistanceScaling: 80,
+      biomeBlend: 0,
+      entityDistanceScaling: 60,
       guiScale: 2,
       fullbright: true,
       rawMouseInput: true,
       lowFireOverlay: true,
+      viewBobbing: true,
+      mipmapZero: false,
+      disableVisualEffects: false,
       disableTelemetry: true,
       modIds: [
         'sodium',
         'lithium',
-        'immediatelyfast',
         'ferritecore',
         'entityculling',
         'modernfix',
-        'moreculling',
         'krypton'
       ]
     }
@@ -129,10 +132,15 @@
   function loadStore() {
     try {
       const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (!raw) return defaultStore();
+      if (!raw) {
+        const fresh = defaultStore();
+        fresh.perfSafetyMigratedV2 = true;
+        fresh.perfPresetRebalancedV3 = true;
+        return fresh;
+      }
       const parsed = JSON.parse(raw);
       const base = defaultStore();
-      return {
+      const loaded = {
         ...base,
         ...parsed,
         config: mergeConfig(base.config, parsed && parsed.config),
@@ -144,8 +152,45 @@
         skinOverrides: (parsed && parsed.skinOverrides) || {},
         optionsPresets: (parsed && parsed.optionsPresets) || {}
       };
+      if (!parsed || !parsed.perfSafetyMigratedV2) {
+        if (loaded.config && loaded.config.performance && Array.isArray(loaded.config.performance.modIds)) {
+          loaded.config.performance.modIds = loaded.config.performance.modIds.filter(
+            (id) => id !== 'immediatelyfast' && id !== 'moreculling'
+          );
+        }
+        if (loaded.config && loaded.config.performance && loaded.config.performance.gc === 'ZGC') {
+          loaded.config.performance.alwaysPreTouch = false;
+        }
+        loaded.perfSafetyMigratedV2 = true;
+      }
+      if (!parsed || !parsed.perfPresetRebalancedV3) {
+        const perfCfg = loaded.config && loaded.config.performance;
+        if (perfCfg && perfCfg.presetId === 'pvp') {
+          Object.assign(perfCfg, {
+            renderDistance: 5,
+            simulationDistance: 5,
+            biomeBlend: 0,
+            entityDistanceScaling: 60
+          });
+        } else if (perfCfg && perfCfg.presetId === 'potato') {
+          Object.assign(perfCfg, {
+            renderDistance: 2,
+            simulationDistance: 5,
+            biomeBlend: 0,
+            entityDistanceScaling: 50,
+            viewBobbing: false,
+            mipmapZero: true,
+            disableVisualEffects: true
+          });
+        }
+        loaded.perfPresetRebalancedV3 = true;
+      }
+      return loaded;
     } catch {
-      return defaultStore();
+      const fresh = defaultStore();
+      fresh.perfSafetyMigratedV2 = true;
+      fresh.perfPresetRebalancedV3 = true;
+      return fresh;
     }
   }
 
@@ -158,6 +203,7 @@
       // Ignora límite de almacenamiento si falla
     }
   }
+  saveStore();
 
   // Bus de eventos simple
   const listeners = {
@@ -208,7 +254,7 @@
   function recommendRam(input) {
     const hw = detectedHardware();
     const versionId = String((input && input.versionId) || '');
-    const loader = ['vanilla', 'fabric', 'forge', 'neoforge'].includes(input && input.loader)
+    const loader = ['vanilla', 'fabric', 'forge', 'neoforge', 'quilt'].includes(input && input.loader)
       ? input.loader
       : 'vanilla';
     const calver = versionId.match(/^(\d{2,})\.(\d+)/);
@@ -290,11 +336,12 @@
         modernVanilla: recommendRam({ versionId: '1.21.4', loader: 'vanilla' }),
         fabric: recommendRam({ versionId: '1.21.4', loader: 'fabric' }),
         forge: recommendRam({ versionId: '1.21.4', loader: 'forge' }),
-        neoforge: recommendRam({ versionId: '1.21.4', loader: 'neoforge' })
+        neoforge: recommendRam({ versionId: '1.21.4', loader: 'neoforge' }),
+        quilt: recommendRam({ versionId: '1.21.4', loader: 'quilt' })
       },
       active: recommendRam({
         versionId: activeInst ? activeInst.versionId : store.config.launch.versionId,
-        loader: activeInst ? activeInst.loader : 'vanilla',
+        loader: activeInst ? activeInst.loader : (store.config.launch.loader || 'vanilla'),
         ramMb: activeInst ? activeInst.ramMb : store.config.launch.ramMb,
         minRamMb: activeInst ? activeInst.minRamMb : store.config.launch.minRamMb
       }),
@@ -313,6 +360,7 @@
 
   const FALLBACK_MC_VERSIONS = [
     { id: '26.3', type: 'release', releaseTime: '2026-04-01T12:00:00Z' },
+    { id: '26.2', type: 'release', releaseTime: '2026-03-01T12:00:00Z' },
     { id: '1.21.11', type: 'release', releaseTime: '2026-01-15T12:00:00Z' },
     { id: '1.21.4', type: 'release', releaseTime: '2024-12-03T12:00:00Z' },
     { id: '1.21.3', type: 'release', releaseTime: '2024-10-23T12:00:00Z' },
@@ -474,7 +522,7 @@
   function resolveJavaStatus(versionId) {
     const req = requiredJavaFor(versionId);
     const list = defaultJavaInstallations();
-    const selected = list.find((j) => j.major >= req) || list[0];
+    const selected = list.find((j) => j.major === req) || list.find((j) => j.major >= req) || list[0];
     return {
       requiredMajor: req,
       installations: list,
@@ -830,7 +878,7 @@
       create: async (request) => {
         const name = String((request && request.name) || '').trim();
         const gameVersion = String((request && request.gameVersion) || '').trim();
-        const loader = ['vanilla', 'fabric', 'forge', 'neoforge'].includes(request && request.loader)
+        const loader = ['vanilla', 'fabric', 'forge', 'neoforge', 'quilt'].includes(request && request.loader)
           ? request.loader
           : 'vanilla';
         const loaderVersion = loader === 'vanilla' ? null : String((request && request.loaderVersion) || '');
@@ -1224,6 +1272,26 @@
             } catch {
               // ignore
             }
+          } else if (loader === 'quilt') {
+            try {
+              const resp = await fetch(`https://meta.quiltmc.org/v3/versions/loader/${encodeURIComponent(gameVersion)}`);
+              if (resp.ok) {
+                const list = await resp.json();
+                return {
+                  items: (Array.isArray(list) ? list : []).map((row) => ({
+                    id: row.loader && row.loader.version,
+                    label: row.loader && row.loader.version,
+                    stable: Boolean(row.loader && row.loader.version && !/-(beta|alpha)/i.test(row.loader.version))
+                  })).filter((x) => x.id),
+                  loader,
+                  gameVersion,
+                  stale: false,
+                  source: 'quilt-meta'
+                };
+              }
+            } catch {
+              // ignore
+            }
           }
           return { items: [], loader, gameVersion, stale: true, source: 'cache' };
         }
@@ -1386,27 +1454,42 @@
           throw new Error(launchState.error);
         }
 
+        const LOADER_CAPS = { vanilla: 'Vanilla', fabric: 'Fabric', forge: 'Forge', neoforge: 'NeoForge', quilt: 'Quilt' };
         const activeInst = store.installations.find((item) => item.id === store.config.launch.activeInstallationId) || null;
-        const mcVersion = activeInst ? activeInst.gameVersion : (preflight.versionId || '1.21.4');
-        const rawLoader = activeInst ? activeInst.loader : ((store.config.performance && store.config.performance.exportLoader) || 'Fabric');
-        const loader = rawLoader.charAt(0).toUpperCase() + rawLoader.slice(1).toLowerCase();
+        let mcVersion = activeInst ? activeInst.gameVersion : (preflight.versionId || '1.21.4');
+        let rawLoader = activeInst ? activeInst.loader : ((store.config.launch && store.config.launch.loader) || 'vanilla');
+        let loaderVersion = activeInst ? (activeInst.loaderVersion || null) : ((store.config.launch && store.config.launch.loaderVersion) || null);
+        if (!activeInst && typeof mcVersion === 'string') {
+          const profMatch = mcVersion.match(/^(fabric|forge|neoforge|quilt)-(.+)-([^-]+)$/i);
+          if (profMatch) {
+            rawLoader = profMatch[1].toLowerCase();
+            loaderVersion = profMatch[2];
+            mcVersion = profMatch[3];
+          }
+        }
+        const loader = LOADER_CAPS[String(rawLoader || 'vanilla').toLowerCase()] || 'Vanilla';
         const ramMb = activeInst ? activeInst.ramMb : (store.config.launch.ramMb || 4096);
         const perfEval = window.Nexus && window.Nexus.perfEngine
           ? window.Nexus.perfEngine.evaluateFromConfig(store.config)
           : null;
         const perfCfg = store.config.performance || {};
-        const enabledModIds = perfEval
-          ? perfEval.mods.filter((m) => m.enabled && m.id !== 'optifine').map((m) => m.id)
-          : (Array.isArray(perfCfg.modIds) ? perfCfg.modIds : []);
+        const enabledModIds = loader === 'Vanilla'
+          ? []
+          : (perfEval
+              ? perfEval.mods.filter((m) => m.enabled && m.id !== 'optifine').map((m) => m.id)
+              : (Array.isArray(perfCfg.modIds) ? perfCfg.modIds : []));
 
+        const closeBehavior = (store.config.general && store.config.general.closeBehavior) || 'quit';
         const payload = {
           profileId: (activeInst && activeInst.id) || (perfEval && perfEval.presetId) || 'default',
           profileName: (activeInst && activeInst.name) || (perfEval && perfEval.presetName) || 'Pan Launcher',
           mcVersion,
-          loader: loader === 'Vanilla' ? 'Vanilla' : loader,
+          loader,
+          loaderVersion,
+          closeBehavior,
           ramGb: Math.max(1, Number((ramMb / 1024).toFixed(2))),
           gc: (perfEval && perfEval.jvm && perfEval.jvm.gc) || perfCfg.gc || 'ZGC',
-          alwaysPreTouch: perfCfg.alwaysPreTouch !== false,
+          alwaysPreTouch: perfCfg.alwaysPreTouch !== undefined ? Boolean(perfCfg.alwaysPreTouch) : false,
           stringDeduplication: Boolean(perfCfg.stringDeduplication),
           parallelThreads: Number(perfCfg.parallelThreads) || 4,
           customJavaPath: (activeInst && activeInst.javaPath) || store.config.launch.javaPath || '',
@@ -1440,7 +1523,7 @@
         };
         emit(listeners.launchStatus, clone(launchState));
 
-        let shutdownTriggered = false;
+        let hideTriggered = false;
         const pollTimer = window.setInterval(async () => {
           try {
             const stResp = await fetch('/api/local/status', { cache: 'no-store' });
@@ -1475,12 +1558,17 @@
                 pid: st.pid || null
               };
               emit(listeners.launchStatus, clone(launchState));
-              if (!shutdownTriggered && store.config.general && store.config.general.closeBehavior === 'quit') {
-                shutdownTriggered = true;
-                window.setTimeout(() => {
-                  fetch('/api/local/shutdown', { method: 'POST' }).catch(() => {});
+              if (!hideTriggered && closeBehavior === 'quit') {
+                hideTriggered = true;
+                window.setTimeout(async () => {
+                  window.clearInterval(pollTimer);
+                  try {
+                    await fetch('/api/local/hide-ui', { method: 'POST' });
+                  } catch {
+                    /* ignore */
+                  }
                   try { window.close(); } catch { /* ignore */ }
-                }, 1400);
+                }, 900);
               }
               return;
             }
@@ -1494,6 +1582,11 @@
         return clone(launchState);
       },
       stop: async () => {
+        try {
+          await fetch('/api/local/stop', { method: 'POST' });
+        } catch {
+          // Ignore network stop errors in web preview
+        }
         launchState.active = null;
         launchState.status = 'idle';
         emit(listeners.launchStatus, clone(launchState));

@@ -2528,3 +2528,146 @@ body.low-end-mode .installation-card {
     grid-template-columns: 1fr;
   }
 }
+
+/* ---------- Selector rápido de cargador (Vanilla / Fabric / Forge / NeoForge / Quilt) ---------- */
+
+.loader-switcher-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+  border-color: var(--border);
+  background: linear-gradient(155deg, rgba(240, 178, 58, 0.06), var(--surface));
+}
+
+.loader-switcher-bar.is-compact {
+  margin-bottom: 14px;
+  padding: 13px 16px;
+}
+
+.loader-switcher-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+}
+
+.loader-switcher-copy {
+  display: grid;
+  gap: 2px;
+}
+
+.loader-switcher-copy strong {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.loader-switcher-copy span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.loader-segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #0d0906;
+}
+
+.loader-seg-btn {
+  padding: 7px 13px;
+  border: 1px solid transparent;
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.loader-seg-btn:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.loader-seg-btn.active {
+  border-color: var(--accent-line);
+  background: var(--accent);
+  color: #160f07;
+  font-weight: 700;
+}
+
+.loader-switcher-build {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.loader-switcher-build label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.loader-build-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 240px;
+  max-width: 380px;
+}
+
+.loader-version-select {
+  flex: 1 1 auto;
+  min-width: 180px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #100b07;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.loader-build-note {
+  color: var(--warning);
+  font-size: 11px;
+}
+
+@media (max-width: 700px) {
+  .loader-switcher-main {
+    align-items: stretch;
+  }
+
+  .loader-segmented {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .loader-seg-btn {
+    flex: 1 1 auto;
+    text-align: center;
+    padding: 7px 8px;
+  }
+
+  .loader-build-controls {
+    width: 100%;
+    max-width: none;
+  }
+
+  .loader-version-select {
+    min-width: 0;
+  }
+}
+

@@ -70,7 +70,8 @@
       { id: 'vanilla', label: 'Vanilla' },
       { id: 'fabric', label: 'Fabric' },
       { id: 'forge', label: 'Forge' },
-      { id: 'neoforge', label: 'NeoForge' }
+      { id: 'neoforge', label: 'NeoForge' },
+      { id: 'quilt', label: 'Quilt' }
     ];
     const catalog = form.catalog || [];
     const catalogLimit = form.catalogLimit || 48;

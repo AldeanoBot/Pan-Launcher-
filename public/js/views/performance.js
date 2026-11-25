@@ -73,6 +73,8 @@
              <select id="perf-export-loader" class="perf-loader-select" aria-label="Loader para .mrpack">
                <option value="Fabric"${exportLoader === 'Fabric' ? ' selected' : ''}>Fabric</option>
                <option value="NeoForge"${exportLoader === 'NeoForge' ? ' selected' : ''}>NeoForge</option>
+               <option value="Forge"${exportLoader === 'Forge' ? ' selected' : ''}>Forge</option>
+               <option value="Quilt"${exportLoader === 'Quilt' ? ' selected' : ''}>Quilt</option>
              </select>
              <button type="button" class="btn btn-outline-accent btn-sm" data-action="perf-export-mrpack">
                <span data-icon="download"></span> Exportar .mrpack (${escapeHtml(activeVersion)})
@@ -188,7 +190,7 @@
                   <label for="perf-simulation-distance">Distancia de simulación</label>
                   <strong class="tabular" id="perf-sim-val">${escapeHtml(String(video.simulationDistance))} chunks</strong>
                 </div>
-                <input type="range" id="perf-simulation-distance" min="4" max="16" step="1" value="${video.simulationDistance}">
+                <input type="range" id="perf-simulation-distance" min="5" max="16" step="1" value="${Math.max(5, Number(video.simulationDistance) || 5)}">
               </div>
 
               <div class="perf-slider-group">
@@ -266,6 +268,30 @@
                     <small>Evita tope a 60 Hz y reduce el retraso entre clic y pantalla.</small>
                   </div>
                   <input type="checkbox" class="perf-flag-input" data-flag="vsync" data-invert="true"${!video.vsync ? ' checked' : ''}>
+                </label>
+
+                <label class="perf-toggle-row">
+                  <div>
+                    <strong>Desactivar balanceo de la mano al caminar (bobView OFF)</strong>
+                    <small>Quita por completo el movimiento de balanceo de la mano y la cámara al correr o caminar.</small>
+                  </div>
+                  <input type="checkbox" class="perf-flag-input" data-flag="viewBobbing" data-invert="true"${video.viewBobbing === false ? ' checked' : ''}>
+                </label>
+
+                <label class="perf-toggle-row">
+                  <div>
+                    <strong>Desactivar mipmaps de texturas (Mipmap 0)</strong>
+                    <small>Ahorra memoria VRAM y exprime FPS extra en gráficas integradas.</small>
+                  </div>
+                  <input type="checkbox" class="perf-flag-input" data-flag="mipmapZero"${video.mipmapZero ? ' checked' : ''}>
+                </label>
+
+                <label class="perf-toggle-row">
+                  <div>
+                    <strong>Cero efectos de blur, brillo de ítems y distorsión FOV</strong>
+                    <small>Desactiva blur de menús, brillo de encantamientos y sacudida/zoom de pantalla.</small>
+                  </div>
+                  <input type="checkbox" class="perf-flag-input" data-flag="disableVisualEffects"${video.disableVisualEffects ? ' checked' : ''}>
                 </label>
 
                 <label class="perf-toggle-row">

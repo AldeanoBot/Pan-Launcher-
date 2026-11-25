@@ -109,33 +109,56 @@ test('detectModConflicts catches Sodium + OptiFine enabled together', () => {
   assert.match(conflicts[0].label, /Sodium.*OptiFine|OptiFine.*Sodium/);
 });
 
-test('generateJvmArgs produces ZGC generational flags and correct RAM allocation', () => {
+test('generateJvmArgs produces ZGC generational flags and safe memory/GC flags', () => {
   const args = generateJvmArgs(sampleJvm);
   assert.ok(args.includes('-Xms6144M'));
   assert.ok(args.includes('-Xmx6144M'));
   assert.ok(args.includes('-XX:+UseZGC'));
   assert.ok(args.includes('-XX:+ZGenerational'));
-  assert.ok(args.includes('-XX:+AlwaysPreTouch'));
+  assert.ok(!args.includes('-XX:+AlwaysPreTouch'));
+  assert.ok(!args.includes('-XX:+DisableExplicitGC'));
+  assert.ok(args.includes('-XX:+ExplicitGCInvokesConcurrent'));
   assert.ok(args.includes('-Djdk.nio.maxCachedBufferSize=262144'));
 });
 
-test('generateJvmArgs omits -XX:+ZGenerational on Java 25 / Minecraft 26.3 and falls back to G1GC on 1.12.2', () => {
+test('generateJvmArgs omits -XX:+ZGenerational and -XX:+UseCompactObjectHeaders on Java 25 / Minecraft 26.3 and keeps AlwaysPreTouch on G1GC', () => {
   const args263 = generateJvmArgs(sampleJvm, '26.3');
   assert.ok(args263.includes('-XX:+UseZGC'));
   assert.ok(!args263.includes('-XX:+ZGenerational'));
-  assert.ok(args263.includes('-XX:+UseCompactObjectHeaders'));
+  assert.ok(!args263.includes('-XX:+UseCompactObjectHeaders'));
 
   const args112 = generateJvmArgs(sampleJvm, '1.12.2');
   assert.ok(!args112.includes('-XX:+UseZGC'));
   assert.ok(args112.includes('-XX:+UseG1GC'));
+  assert.ok(args112.includes('-XX:+AlwaysPreTouch'));
 });
 
-test('generateOptionsTxt outputs valid Minecraft options keys', () => {
+test('generateOptionsTxt outputs valid Minecraft options keys including extreme Ultra FPS flags', () => {
   const txt = generateOptionsTxt(sampleVideo, sampleNetwork);
   assert.match(txt, /renderDistance:8/);
   assert.match(txt, /ao:false/);
   assert.match(txt, /entityShadows:false/);
   assert.match(txt, /snooperEnabled:false/);
+
+  const extremeTxt = generateOptionsTxt(
+    {
+      ...sampleVideo,
+      renderDistance: 2,
+      simulationDistance: 5,
+      biomeBlend: 0,
+      entityDistanceScaling: 50,
+      viewBobbing: false,
+      mipmapZero: true,
+      disableVisualEffects: true,
+    },
+    sampleNetwork
+  );
+  assert.match(extremeTxt, /renderDistance:2/);
+  assert.match(extremeTxt, /bobView:false/);
+  assert.match(extremeTxt, /mipmapLevels:0/);
+  assert.match(extremeTxt, /menuBackgroundBlurriness:0/);
+  assert.match(extremeTxt, /glintSpeed:0\.0/);
+  assert.match(extremeTxt, /fovEffectScale:0\.0/);
 });
 
 test('generateWindowsInstallerPs1 and generateUnixInstallerSh write options.txt and download resolved mods', () => {

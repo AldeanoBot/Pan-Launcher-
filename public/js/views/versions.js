@@ -163,6 +163,8 @@
 
         ${state.versionsWarning ? `<div class="catalog-warning">${escapeHtml(state.versionsWarning)}</div>` : ''}
 
+        ${Nexus.views.loaderSwitcherBar ? Nexus.views.loaderSwitcherBar(state, true) : ''}
+
         <div class="toolbar">
           <div class="search-box">
             <span data-icon="search"></span>

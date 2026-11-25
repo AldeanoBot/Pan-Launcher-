@@ -52,7 +52,7 @@ export function estimatePerformance(
   const baseHardwareFps = HARDWARE_BASELINE_FPS[hardwareTier];
 
   // Video load penalty/bonus relative to Minecraft default (12 chunks, fancy, smooth lighting on)
-  const chunkFactor = Math.max(0.45, Math.min(1.55, 12 / Math.max(2, video.renderDistance)));
+  const chunkFactor = Math.max(0.45, Math.min(2.1, 12 / Math.max(2, video.renderDistance)));
   const graphicsMultiplier =
     video.graphicsMode === 'fast' ? 1.14 : video.graphicsMode === 'fancy' ? 1.0 : 0.74;
   const smoothLightingMultiplier = video.smoothLighting ? 0.95 : 1.04;
@@ -60,8 +60,13 @@ export function estimatePerformance(
   const particleMultiplier =
     video.particles === 'minimal' ? 1.06 : video.particles === 'decreased' ? 1.02 : 0.95;
   const cloudsMultiplier = video.clouds === 'off' ? 1.03 : video.clouds === 'fast' ? 1.0 : 0.94;
-  const biomeMultiplier = video.biomeBlend <= 1 ? 1.03 : Math.max(0.88, 1 - video.biomeBlend * 0.015);
-  const entityDistMultiplier = Math.max(0.84, Math.min(1.1, 100 / Math.max(50, video.entityDistanceScaling)));
+  const biomeMultiplier =
+    video.biomeBlend <= 0 ? 1.05 : video.biomeBlend <= 1 ? 1.03 : Math.max(0.88, 1 - video.biomeBlend * 0.015);
+  const entityDistMultiplier = Math.max(0.84, Math.min(1.16, 100 / Math.max(50, video.entityDistanceScaling)));
+  const extraEffectsMultiplier =
+    (video.mipmapZero ? 1.06 : 1.0) *
+    (video.disableVisualEffects ? 1.05 : 1.0) *
+    (video.viewBobbing === false ? 1.01 : 1.0);
 
   const rawVideoMultiplier =
     chunkFactor *
@@ -71,7 +76,8 @@ export function estimatePerformance(
     particleMultiplier *
     cloudsMultiplier *
     biomeMultiplier *
-    entityDistMultiplier;
+    entityDistMultiplier *
+    extraEffectsMultiplier;
   const videoMultiplier = Math.pow(rawVideoMultiplier, 0.58);
 
   const vanillaFps = Math.max(
@@ -159,15 +165,14 @@ export function generateJvmArgs(jvm: JvmConfig, mcVersionOrJavaMajor?: string | 
   const javaMajor = resolveJavaMajorFromVersion(mcVersionOrJavaMajor);
   const useSafeG1 = javaMajor !== null && javaMajor < 21 && jvm.gc === 'ZGC';
 
-  if (jvm.gc === 'ZGC' && !useSafeG1) {
+  const activeGc = jvm.gc === 'ZGC' && !useSafeG1 ? 'ZGC' : jvm.gc === 'Shenandoah' && (javaMajor === null || javaMajor >= 17) ? 'Shenandoah' : 'G1GC';
+
+  if (activeGc === 'ZGC') {
     args.push('-XX:+UseZGC');
-    if (javaMajor !== null && javaMajor >= 24) {
-      // Java 24/25 removed -XX:+ZGenerational and enables Generational ZGC by default
-      args.push('-XX:+UnlockExperimentalVMOptions', '-XX:+UseCompactObjectHeaders');
-    } else {
+    if (javaMajor === null || javaMajor < 24) {
       args.push('-XX:+ZGenerational');
     }
-  } else if (jvm.gc === 'Shenandoah' && (javaMajor === null || javaMajor >= 17)) {
+  } else if (activeGc === 'Shenandoah') {
     args.push('-XX:+UseShenandoahGC', '-XX:ShenandoahGCHeuristics=compact');
   } else {
     args.push(
@@ -180,16 +185,16 @@ export function generateJvmArgs(jvm: JvmConfig, mcVersionOrJavaMajor?: string | 
     );
   }
 
-  if (jvm.alwaysPreTouch) {
+  if (jvm.alwaysPreTouch && activeGc !== 'ZGC') {
     args.push('-XX:+AlwaysPreTouch');
   }
-  if (jvm.stringDeduplication && (jvm.gc !== 'ZGC' || useSafeG1)) {
+  if (jvm.stringDeduplication && activeGc !== 'ZGC') {
     args.push('-XX:+UseStringDeduplication');
   }
 
   args.push(
     `-XX:ConcGCThreads=${Math.max(1, Math.min(8, jvm.parallelThreads))}`,
-    '-XX:+DisableExplicitGC',
+    '-XX:+ExplicitGCInvokesConcurrent',
     '-XX:+PerfDisableSharedMem',
     '-Djdk.nio.maxCachedBufferSize=262144',
     '-Dfml.readTimeout=90'
@@ -214,7 +219,7 @@ export function generateOptionsTxt(video: VideoSettings, network: NetworkConfig)
   return [
     '# Pan-launcher - Configuracion Ultra FPS generada automaticamente',
     `renderDistance:${video.renderDistance}`,
-    `simulationDistance:${video.simulationDistance}`,
+    `simulationDistance:${Math.max(5, Number(video.simulationDistance) || 5)}`,
     `maxFps:${video.maxFps >= 260 ? 260 : video.maxFps}`,
     `graphicsMode:${graphicsNum}`,
     `ao:${video.smoothLighting ? 'true' : 'false'}`,
@@ -226,6 +231,19 @@ export function generateOptionsTxt(video: VideoSettings, network: NetworkConfig)
     `entityDistanceScaling:${(video.entityDistanceScaling / 100).toFixed(2)}`,
     `guiScale:${video.guiScale}`,
     `gamma:${video.fullbright ? '10.0' : '1.0'}`,
+    `bobView:${video.viewBobbing === false ? 'false' : 'true'}`,
+    `mipmapLevels:${video.mipmapZero ? 0 : 4}`,
+    ...(video.disableVisualEffects
+      ? [
+          'menuBackgroundBlurriness:0',
+          'glintSpeed:0.0',
+          'glintStrength:0.0',
+          'screenEffectScale:0.0',
+          'fovEffectScale:0.0',
+          'darknessEffectScale:0.0',
+          'damageTiltStrength:0.0',
+        ]
+      : []),
     `rawMouseInput:true`,
     `skipMultiplayerWarning:true`,
     `snooperEnabled:${network.disableTelemetry ? 'false' : 'true'}`,

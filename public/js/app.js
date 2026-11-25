@@ -52,6 +52,14 @@
     return Nexus.state;
   }
 
+  const DIRECT_LOADER_LABELS = Object.freeze({
+    vanilla: 'Vanilla',
+    fabric: 'Fabric',
+    forge: 'Forge',
+    neoforge: 'NeoForge',
+    quilt: 'Quilt'
+  });
+
   function currentVersionId() {
     const current = state();
     if (!current || !current.config) return '—';
@@ -59,7 +67,11 @@
       .find((item) => item.id === current.config.launch.activeInstallationId);
     if (active) return `${active.name} · ${active.versionId}`;
     if (!current.versions || current.versions.length === 0) return '—';
-    return current.config.launch.versionId;
+    const ver = current.config.launch.versionId;
+    const loader = String(current.config.launch.loader || 'vanilla').toLowerCase();
+    return loader !== 'vanilla'
+      ? `${ver} · ${DIRECT_LOADER_LABELS[loader] || loader}`
+      : ver;
   }
 
   function setChip(id, icon, text) {
@@ -410,8 +422,60 @@
 
   function loaderForView(view) {
     if (view === 'fabric') return 'fabric';
-    if (view === 'forge') return state().loaders.loader === 'neoforge' ? 'neoforge' : 'forge';
+    if (view === 'forge') {
+      const cur = state().loaders.loader;
+      return cur === 'neoforge' || cur === 'quilt' ? cur : 'forge';
+    }
     return null;
+  }
+
+  async function ensureDirectLoaderCatalog(force) {
+    const current = state();
+    if (!current || !current.config || !current.config.launch) return;
+    const dl = (current.directLoader = current.directLoader || {
+      loader: null,
+      gameVersion: null,
+      state: 'idle',
+      items: [],
+      error: '',
+      stale: false
+    });
+    const loader = String(current.config.launch.loader || 'vanilla').toLowerCase();
+    const gv = String(current.config.launch.versionId || '').trim();
+    if (loader === 'vanilla' || !gv || current.config.launch.activeInstallationId) {
+      dl.loader = loader;
+      dl.gameVersion = gv;
+      dl.state = 'idle';
+      dl.items = [];
+      dl.error = '';
+      dl.stale = false;
+      return;
+    }
+    if (!force && dl.loader === loader && dl.gameVersion === gv && (dl.state === 'ready' || dl.state === 'loading')) {
+      return;
+    }
+    dl.loader = loader;
+    dl.gameVersion = gv;
+    dl.state = 'loading';
+    dl.items = [];
+    dl.error = '';
+    dl.stale = false;
+    if (Nexus.router.current === 'home' || Nexus.router.current === 'versions') refresh();
+
+    try {
+      const res = await Nexus.api.catalogs.get(loader, gv, force ? { force: true } : undefined);
+      if (dl.loader !== loader || dl.gameVersion !== gv) return;
+      dl.items = Array.isArray(res && res.items) ? res.items : [];
+      dl.stale = Boolean(res && res.stale);
+      dl.error = dl.items.length ? '' : (res && res.warning ? res.warning : `Sin builds oficiales de ${DIRECT_LOADER_LABELS[loader] || loader} para ${gv}.`);
+      dl.state = 'ready';
+    } catch (error) {
+      if (dl.loader !== loader || dl.gameVersion !== gv) return;
+      dl.items = [];
+      dl.state = 'error';
+      dl.error = publicErrorMessage(error);
+    }
+    if (Nexus.router.current === 'home' || Nexus.router.current === 'versions') refresh();
   }
 
   async function ensureLoaderVersions(loader, force) {
@@ -755,9 +819,26 @@
           toast('Versión no válida.', 'error');
           return;
         }
-        await applyConfig({ launch: { versionId: id, activeInstallationId: null } }, `Versión ${id} seleccionada.`);
+        await applyConfig({ launch: { versionId: id, loaderVersion: null, activeInstallationId: null } }, `Versión ${id} seleccionada.`);
+        ensureDirectLoaderCatalog(false).catch(() => {});
         break;
       }
+
+      case 'set-launch-loader': {
+        const loader = String(node.getAttribute('data-loader') || '').toLowerCase();
+        if (!['vanilla', 'fabric', 'forge', 'neoforge', 'quilt'].includes(loader)) return;
+        const label = DIRECT_LOADER_LABELS[loader] || loader;
+        await applyConfig(
+          { launch: { loader, loaderVersion: null, activeInstallationId: null } },
+          `Cargador cambiado a ${label}.`
+        );
+        ensureDirectLoaderCatalog(false).catch(() => {});
+        break;
+      }
+
+      case 'refresh-direct-loader-catalog':
+        await ensureDirectLoaderCatalog(true);
+        break;
 
       case 'install-version': {
         const id = node.getAttribute('data-version-id');
@@ -1003,7 +1084,7 @@
 
       case 'loader-switch': {
         const loader = node.getAttribute('data-loader');
-        if (loader !== 'forge' && loader !== 'neoforge') return;
+        if (!['forge', 'neoforge', 'quilt'].includes(loader)) return;
         if (current.loaders.loader === loader) return;
         current.loaders.loader = loader;
         current.loaders.progress = null;
@@ -1076,7 +1157,7 @@
 
       case 'new-install-set-loader': {
         const loader = node.getAttribute('data-loader');
-        if (!['vanilla', 'fabric', 'forge', 'neoforge'].includes(loader)) return;
+        if (!['vanilla', 'fabric', 'forge', 'neoforge', 'quilt'].includes(loader)) return;
         const form = current.newInstall;
         form.loader = loader;
         form.loaderVersion = null;
@@ -1667,6 +1748,8 @@
       } else if (target.id === 'folders-installation') {
         state().folders.installationId = target.value;
         refreshFolders().catch((error) => toast(error.message, 'error'));
+      } else if (target.id === 'home-loader-version') {
+        applyConfig({ launch: { loaderVersion: target.value || null } });
       } else if (target.id === 'skin-import-model') {
         state().skins.importModel = target.value;
       }
@@ -1805,6 +1888,14 @@
           loaded: false,
           importModel: 'classic'
         },
+        directLoader: {
+          loader: null,
+          gameVersion: null,
+          state: 'idle',
+          items: [],
+          error: '',
+          stale: false
+        },
         ui: { search: '', filter: 'all', sort: 'newest', limit: lowEndPageSize('versions') }
       };
 
@@ -1853,6 +1944,7 @@
         }
       }, { once: true });
       refreshLaunchPreflight().catch(() => {});
+      ensureDirectLoaderCatalog(false).catch(() => {});
       updateShell();
       Nexus.api.listVersions().then(applyVersionCatalog).catch((error) => {
         const current = state();

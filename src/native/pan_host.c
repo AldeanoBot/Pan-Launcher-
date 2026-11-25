@@ -19,6 +19,7 @@
 
 #define WM_TRAY_CALLBACK (WM_APP + 10)
 #define WM_APP_SHUTDOWN  (WM_APP + 11)
+#define WM_APP_REOPEN_UI (WM_APP + 12)
 #define ID_TRAY_ICON     1
 #define IDM_OPEN_UI      1001
 #define IDM_EXIT_APP     1002
@@ -234,7 +235,7 @@ static void SendHttpResponse(
       sizeof(hdr),
       "HTTP/1.1 %d %s\r\n"
       "Content-Type: %s\r\n"
-      "Content-Length: %zu\r\n"
+      "Content-Length: %llu\r\n"
       "Connection: close\r\n"
       "Access-Control-Allow-Origin: *\r\n"
       "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
@@ -243,7 +244,7 @@ static void SendHttpResponse(
       code,
       statusText,
       contentType,
-      bodyLen,
+      (unsigned long long)bodyLen,
       noStore ? "Cache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\n" : "",
       extraHeaders ? extraHeaders : "");
   if (hlen > 0) {
@@ -572,11 +573,12 @@ static void HandleMcPing(SOCKET clientSock, const char* reqBody, size_t reqLen) 
  * Live Mojang Versions Query (with fast cached fallback)
  * ========================================================================= */
 
-static void HandleMcVersions(SOCKET clientSock) {
+static void HandleMcVersionsImpl(SOCKET clientSock, int panFormat) {
   static const char* FALLBACK_VERSIONS =
       "{\"latest\":{\"release\":\"26.3\",\"snapshot\":\"26w14a\"},"
       "\"versions\":["
       "{\"id\":\"26.3\",\"type\":\"release\"},"
+      "{\"id\":\"26.2\",\"type\":\"release\"},"
       "{\"id\":\"1.21.11\",\"type\":\"release\"},"
       "{\"id\":\"1.21.4\",\"type\":\"release\"},"
       "{\"id\":\"1.21.3\",\"type\":\"release\"},"
@@ -590,23 +592,41 @@ static void HandleMcVersions(SOCKET clientSock) {
       "{\"id\":\"1.8.9\",\"type\":\"release\"}"
       "]}";
 
-  EnterCriticalSection(&g_verCs);
-  if (g_cachedVersionsJson && (GetTickCount64() - g_cachedVersionsAt) < 300000ULL) {
-    char* copy = _strdup(g_cachedVersionsJson);
-    LeaveCriticalSection(&g_verCs);
-    if (copy) {
-      SendJsonResponse(clientSock, 200, copy);
-      free(copy);
-      return;
-    }
-  }
-  LeaveCriticalSection(&g_verCs);
+  static const char* FALLBACK_PAN_VERSIONS =
+      "{\"stale\":true,\"source\":\"cache\",\"items\":["
+      "{\"id\":\"26.3\",\"order\":0,\"type\":\"release\",\"category\":\"release\",\"released\":\"2026-04-01T12:00:00Z\",\"latestRelease\":true},"
+      "{\"id\":\"26.2\",\"order\":1,\"type\":\"release\",\"category\":\"release\",\"released\":\"2026-03-10T12:00:00Z\",\"latestRelease\":false},"
+      "{\"id\":\"1.21.11\",\"order\":2,\"type\":\"release\",\"category\":\"release\",\"released\":\"2025-12-09T12:00:00Z\",\"latestRelease\":false},"
+      "{\"id\":\"1.21.4\",\"order\":3,\"type\":\"release\",\"category\":\"release\",\"released\":\"2024-12-03T12:00:00Z\",\"latestRelease\":false},"
+      "{\"id\":\"1.21.3\",\"order\":4,\"type\":\"release\",\"category\":\"release\",\"released\":\"2024-10-23T12:00:00Z\",\"latestRelease\":false},"
+      "{\"id\":\"1.21.1\",\"order\":5,\"type\":\"release\",\"category\":\"release\",\"released\":\"2024-08-08T12:00:00Z\",\"latestRelease\":false},"
+      "{\"id\":\"1.20.4\",\"order\":6,\"type\":\"release\",\"category\":\"release\",\"released\":\"2023-12-07T12:00:00Z\",\"latestRelease\":false},"
+      "{\"id\":\"1.20.1\",\"order\":7,\"type\":\"release\",\"category\":\"release\",\"released\":\"2023-06-12T12:00:00Z\",\"latestRelease\":false},"
+      "{\"id\":\"1.19.4\",\"order\":8,\"type\":\"release\",\"category\":\"release\",\"released\":\"2023-03-14T12:00:00Z\",\"latestRelease\":false},"
+      "{\"id\":\"1.16.5\",\"order\":9,\"type\":\"release\",\"category\":\"release\",\"released\":\"2021-01-15T12:00:00Z\",\"latestRelease\":false},"
+      "{\"id\":\"1.12.2\",\"order\":10,\"type\":\"release\",\"category\":\"release\",\"released\":\"2017-09-18T12:00:00Z\",\"latestRelease\":false},"
+      "{\"id\":\"1.8.9\",\"order\":11,\"type\":\"release\",\"category\":\"release\",\"released\":\"2015-12-09T12:00:00Z\",\"latestRelease\":false}"
+      "]}";
 
-  /* Quick WinHTTP query to Mojang Piston Meta (2s timeout) */
+  if (!panFormat) {
+    EnterCriticalSection(&g_verCs);
+    if (g_cachedVersionsJson && (GetTickCount64() - g_cachedVersionsAt) < 300000ULL) {
+      char* copy = _strdup(g_cachedVersionsJson);
+      LeaveCriticalSection(&g_verCs);
+      if (copy) {
+        SendJsonResponse(clientSock, 200, copy);
+        free(copy);
+        return;
+      }
+    }
+    LeaveCriticalSection(&g_verCs);
+  }
+
+  /* Quick WinHTTP query to Mojang Piston Meta */
   char* builtJson = NULL;
-  HINTERNET hSession = WinHttpOpen(L"PanLauncher/2.2 (Windows)", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+  HINTERNET hSession = WinHttpOpen(L"PanLauncher/2.4 (Windows)", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
   if (hSession) {
-    WinHttpSetTimeouts(hSession, 1800, 1800, 1800, 2200);
+    WinHttpSetTimeouts(hSession, 2000, 2000, 2000, 3500);
     HINTERNET hConn = WinHttpConnect(hSession, L"piston-meta.mojang.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
     if (hConn) {
       HINTERNET hReq = WinHttpOpenRequest(hConn, L"GET", L"/mc/game/version_manifest_v2.json", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
@@ -640,36 +660,72 @@ static void HandleMcVersions(SOCKET clientSock) {
               PanJsonValue* root = pan_json_parse(buf, len);
               if (root) {
                 const PanJsonValue* latest = pan_json_get(root, "latest");
-                const char* lrel = pan_json_str(pan_json_get(latest, "release"), "1.21.4");
-                const char* lsnp = pan_json_str(pan_json_get(latest, "snapshot"), "25w06a");
+                const char* lrel = pan_json_str(pan_json_get(latest, "release"), "26.3");
+                const char* lsnp = pan_json_str(pan_json_get(latest, "snapshot"), "26w14a");
                 const PanJsonValue* vers = pan_json_get(root, "versions");
 
-                builtJson = (char*)malloc(8192);
-                if (builtJson && vers && vers->type == PAN_JSON_ARRAY) {
-                  char eRel[64], eSnp[64];
-                  EscapeJsonStr(lrel, eRel, sizeof(eRel));
-                  EscapeJsonStr(lsnp, eSnp, sizeof(eSnp));
-                  size_t pos = (size_t)_snprintf(
-                      builtJson, 8192,
-                      "{\"latest\":{\"release\":\"%s\",\"snapshot\":\"%s\"},\"versions\":[",
-                      eRel, eSnp);
-                  int added = 0;
-                  for (size_t i = 0; i < vers->u.arr.count && added < 20 && pos + 128 < 8192; i++) {
-                    const PanJsonValue* item = vers->u.arr.items[i];
-                    const char* vtype = pan_json_str(pan_json_get(item, "type"), "");
-                    const char* vid = pan_json_str(pan_json_get(item, "id"), "");
-                    if (strcmp(vtype, "release") == 0 && vid[0]) {
-                      char eId[64];
+                if (panFormat && vers && vers->type == PAN_JSON_ARRAY) {
+                  size_t outCap = 131072;
+                  builtJson = (char*)malloc(outCap);
+                  if (builtJson) {
+                    size_t pos = (size_t)_snprintf(builtJson, outCap, "{\"stale\":false,\"source\":\"official\",\"items\":[");
+                    int added = 0;
+                    for (size_t i = 0; i < vers->u.arr.count && added < 350 && pos + 320 < outCap; i++) {
+                      const PanJsonValue* item = vers->u.arr.items[i];
+                      const char* vtype = pan_json_str(pan_json_get(item, "type"), "release");
+                      const char* vid = pan_json_str(pan_json_get(item, "id"), "");
+                      const char* rtime = pan_json_str(pan_json_get(item, "releaseTime"), "");
+                      const char* sha1 = pan_json_str(pan_json_get(item, "sha1"), "");
+                      if (!vid[0]) continue;
+                      char eId[64], eType[32], eRt[64], eSha[64];
                       EscapeJsonStr(vid, eId, sizeof(eId));
-                      int wn = _snprintf(builtJson + pos, 8192 - pos, "%s{\"id\":\"%s\",\"type\":\"release\"}", added > 0 ? "," : "", eId);
+                      EscapeJsonStr(vtype, eType, sizeof(eType));
+                      EscapeJsonStr(rtime, eRt, sizeof(eRt));
+                      EscapeJsonStr(sha1, eSha, sizeof(eSha));
+                      int isLatestRel = (strcmp(vid, lrel) == 0);
+                      int isLatestSnap = (strcmp(vid, lsnp) == 0);
+                      int wn = _snprintf(
+                          builtJson + pos, outCap - pos,
+                          "%s{\"id\":\"%s\",\"order\":%d,\"type\":\"%s\",\"category\":\"%s\",\"rawType\":\"%s\",\"released\":\"%s\",\"sha1\":\"%s\",\"source\":\"official\",\"latestRelease\":%s,\"latestSnapshot\":%s}",
+                          added > 0 ? "," : "", eId, added, eType, eType, eType, eRt, eSha,
+                          isLatestRel ? "true" : "false", isLatestSnap ? "true" : "false");
                       if (wn > 0) pos += (size_t)wn;
                       added++;
                     }
+                    if (pos + 4 < outCap) {
+                      builtJson[pos++] = ']';
+                      builtJson[pos++] = '}';
+                      builtJson[pos] = '\0';
+                    }
                   }
-                  if (pos + 4 < 8192) {
-                    builtJson[pos++] = ']';
-                    builtJson[pos++] = '}';
-                    builtJson[pos] = '\0';
+                } else if (!panFormat && vers && vers->type == PAN_JSON_ARRAY) {
+                  builtJson = (char*)malloc(8192);
+                  if (builtJson) {
+                    char eRel[64], eSnp[64];
+                    EscapeJsonStr(lrel, eRel, sizeof(eRel));
+                    EscapeJsonStr(lsnp, eSnp, sizeof(eSnp));
+                    size_t pos = (size_t)_snprintf(
+                        builtJson, 8192,
+                        "{\"latest\":{\"release\":\"%s\",\"snapshot\":\"%s\"},\"versions\":[",
+                        eRel, eSnp);
+                    int added = 0;
+                    for (size_t i = 0; i < vers->u.arr.count && added < 30 && pos + 128 < 8192; i++) {
+                      const PanJsonValue* item = vers->u.arr.items[i];
+                      const char* vtype = pan_json_str(pan_json_get(item, "type"), "");
+                      const char* vid = pan_json_str(pan_json_get(item, "id"), "");
+                      if (strcmp(vtype, "release") == 0 && vid[0]) {
+                        char eId[64];
+                        EscapeJsonStr(vid, eId, sizeof(eId));
+                        int wn = _snprintf(builtJson + pos, 8192 - pos, "%s{\"id\":\"%s\",\"type\":\"release\"}", added > 0 ? "," : "", eId);
+                        if (wn > 0) pos += (size_t)wn;
+                        added++;
+                      }
+                    }
+                    if (pos + 4 < 8192) {
+                      builtJson[pos++] = ']';
+                      builtJson[pos++] = '}';
+                      builtJson[pos] = '\0';
+                    }
                   }
                 }
                 pan_json_free(root);
@@ -686,17 +742,66 @@ static void HandleMcVersions(SOCKET clientSock) {
   }
 
   if (builtJson) {
-    EnterCriticalSection(&g_verCs);
-    free(g_cachedVersionsJson);
-    g_cachedVersionsJson = _strdup(builtJson);
-    g_cachedVersionsAt = GetTickCount64();
-    LeaveCriticalSection(&g_verCs);
+    if (!panFormat) {
+      EnterCriticalSection(&g_verCs);
+      free(g_cachedVersionsJson);
+      g_cachedVersionsJson = _strdup(builtJson);
+      g_cachedVersionsAt = GetTickCount64();
+      LeaveCriticalSection(&g_verCs);
+    }
     SendJsonResponse(clientSock, 200, builtJson);
     free(builtJson);
     return;
   }
 
-  SendJsonResponse(clientSock, 200, FALLBACK_VERSIONS);
+  SendJsonResponse(clientSock, 200, panFormat ? FALLBACK_PAN_VERSIONS : FALLBACK_VERSIONS);
+}
+
+static void HandleMcVersions(SOCKET clientSock) {
+  HandleMcVersionsImpl(clientSock, 0);
+}
+
+static void HandlePanVersions(SOCKET clientSock) {
+  HandleMcVersionsImpl(clientSock, 1);
+}
+
+static void HandleLoaderCatalog(SOCKET clientSock, const char* tail) {
+  char loader[32] = "";
+  char mcVer[96] = "1.21.4";
+  const char* slash = tail ? strchr(tail, '/') : NULL;
+  if (tail && slash) {
+    size_t llen = (size_t)(slash - tail);
+    if (llen >= sizeof(loader)) llen = sizeof(loader) - 1;
+    memcpy(loader, tail, llen);
+    loader[llen] = '\0';
+    const char* gv = slash + 1;
+    size_t j = 0;
+    for (size_t i = 0; gv[i] && gv[i] != '/' && j + 1 < sizeof(mcVer); i++) {
+      if (gv[i] == '%' && isxdigit((unsigned char)gv[i + 1]) && isxdigit((unsigned char)gv[i + 2])) {
+        char hx[3] = {gv[i + 1], gv[i + 2], '\0'};
+        mcVer[j++] = (char)strtol(hx, NULL, 16);
+        i += 2;
+      } else {
+        mcVer[j++] = gv[i];
+      }
+    }
+    mcVer[j] = '\0';
+  } else if (tail && tail[0]) {
+    strncpy(loader, tail, sizeof(loader) - 1);
+  }
+
+  if (_stricmp(loader, "vanilla") == 0) {
+    HandlePanVersions(clientSock);
+    return;
+  }
+  char* outBuf = (char*)malloc(32768);
+  if (!outBuf) {
+    SendJsonResponse(clientSock, 500, "{\"error\":\"Sin memoria\"}");
+    return;
+  }
+  pan_mc_loader_catalog_json(loader, mcVer, outBuf, 32768);
+  SendJsonResponse(clientSock, 200, outBuf);
+  free(outBuf);
 }
 
 /* =========================================================================
@@ -916,6 +1021,12 @@ static DWORD WINAPI HttpClientThread(LPVOID param) {
     SendJsonResponse(s, 200, "{\"ok\":true,\"service\":\"pan-launcher-native\",\"canLaunchJava\":true}");
   } else if (strcmp(rel, "api/mc/versions") == 0) {
     HandleMcVersions(s);
+  } else if (strcmp(rel, "api/pan/versions") == 0) {
+    HandlePanVersions(s);
+  } else if (strncmp(rel, "api/pan/loaders/", 16) == 0) {
+    HandleLoaderCatalog(s, rel + 16);
+  } else if (strncmp(rel, "api/pan/catalog/", 16) == 0) {
+    HandleLoaderCatalog(s, rel + 16);
   } else if (strcmp(rel, "api/mc/ping") == 0 && _stricmp(method, "POST") == 0) {
     HandleMcPing(s, bodyPtr, bodyLen);
   } else if (strcmp(rel, "api/local/launch") == 0 && _stricmp(method, "POST") == 0) {
@@ -924,7 +1035,7 @@ static DWORD WINAPI HttpClientThread(LPVOID param) {
     } else {
       char errBuf[1024] = "";
       int rc = pan_mc_start_launch(bodyPtr, bodyLen, errBuf, sizeof(errBuf));
-      if (rc == 0) {
+      if (rc != 0) {
         SendJsonResponse(s, 200, "{\"ok\":true,\"started\":true}");
       } else {
         char escErr[2048];
@@ -934,6 +1045,9 @@ static DWORD WINAPI HttpClientThread(LPVOID param) {
         SendJsonResponse(s, 500, resp);
       }
     }
+  } else if (strcmp(rel, "api/local/stop") == 0 && _stricmp(method, "POST") == 0) {
+    pan_mc_stop();
+    SendJsonResponse(s, 200, "{\"ok\":true}");
   } else if (strcmp(rel, "api/local/status") == 0) {
     char* statusBuf = (char*)malloc(32768);
     if (statusBuf) {
@@ -943,8 +1057,11 @@ static DWORD WINAPI HttpClientThread(LPVOID param) {
     } else {
       SendJsonResponse(s, 500, "{\"state\":\"error\",\"progress\":100,\"step\":\"Sin memoria\",\"error\":\"Sin memoria\"}");
     }
+  } else if (strcmp(rel, "api/local/hide-ui") == 0 && _stricmp(method, "POST") == 0) {
+    SendJsonResponse(s, 200, "{\"ok\":true,\"hidden\":true}");
   } else if (strcmp(rel, "api/local/shutdown") == 0 && _stricmp(method, "POST") == 0) {
     SendJsonResponse(s, 200, "{\"ok\":true}");
+    pan_mc_shutdown();
     InterlockedExchange(&g_shuttingDown, 1);
     if (g_trayHwnd) {
       PostMessageW(g_trayHwnd, WM_APP_SHUTDOWN, 0, 0);
@@ -1040,6 +1157,12 @@ static LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
       }
       return 0;
 
+    case WM_APP_REOPEN_UI:
+      if (InterlockedCompareExchange(&g_shuttingDown, 0, 0) == 0) {
+        OpenLauncherUi(g_panDir, g_port);
+      }
+      return 0;
+
     case WM_APP_SHUTDOWN:
     case WM_CLOSE:
       InterlockedExchange(&g_shuttingDown, 1);
@@ -1064,6 +1187,12 @@ static LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 /* =========================================================================
  * Entry Point
  * ========================================================================= */
+
+static void OnMcExitReopenUi(void) {
+  if (g_trayHwnd && InterlockedCompareExchange(&g_shuttingDown, 0, 0) == 0) {
+    PostMessageW(g_trayHwnd, WM_APP_REOPEN_UI, 0, 0);
+  }
+}
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR lpCmdLine, int nCmdShow) {
   (void)hPrev;
@@ -1134,6 +1263,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR lpCmdLine, int nCmdS
   }
 
   pan_mc_init(g_panDir);
+  pan_mc_set_reopen_ui_cb(OnMcExitReopenUi);
 
   WNDCLASSEXW wc;
   ZeroMemory(&wc, sizeof(wc));

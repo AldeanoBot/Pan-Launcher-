@@ -188,6 +188,103 @@ export function mapNeoforgeLoaderItems(xml: string, gameVersion: string): PanLoa
   return items.sort(compareLoaderItems);
 }
 
+export function mapQuiltLoaderItems(data: unknown, gameVersion: string): PanLoaderCatalogItem[] {
+  if (!Array.isArray(data)) {
+    throw new Error('El metadato oficial de Quilt no es una lista.');
+  }
+  const items: PanLoaderCatalogItem[] = [];
+  for (const entry of data) {
+    const rec = entry as {
+      loader?: { version?: unknown; maven?: unknown };
+      launcherMeta?: { min_java_version?: unknown };
+    };
+    const info = rec?.loader;
+    if (!info || typeof info.version !== 'string' || !/^[A-Za-z0-9._+-]{1,64}$/.test(info.version)) {
+      continue;
+    }
+    const minJavaNum = Number(rec.launcherMeta?.min_java_version);
+    const isStable = !/-beta|-alpha|pre/i.test(info.version);
+    items.push({
+      id: info.version,
+      label: info.version,
+      loaderVersion: info.version,
+      gameVersion,
+      stable: isStable,
+      maven: typeof info.maven === 'string' ? info.maven : `org.quiltmc:quilt-loader:${info.version}`,
+      minJava: Number.isInteger(minJavaNum) && minJavaNum > 0 ? minJavaNum : null,
+    });
+  }
+  if (items.length === 0) {
+    throw new Error(`Quilt no publica cargadores para ${gameVersion}.`);
+  }
+  return items.sort(compareLoaderItems);
+}
+
+export type SupportedLoaderId = 'vanilla' | 'fabric' | 'forge' | 'neoforge' | 'quilt';
+
+export function normalizeLoaderId(raw: unknown): SupportedLoaderId {
+  const s = String(raw || '').trim().toLowerCase();
+  if (s === 'fabric') return 'fabric';
+  if (s === 'forge') return 'forge';
+  if (s === 'neoforge') return 'neoforge';
+  if (s === 'quilt') return 'quilt';
+  return 'vanilla';
+}
+
+export function requiredJavaForVersion(versionId: string): number {
+  const raw = String(versionId || '').trim();
+  if (!raw) return 21;
+  const parts = raw.split('.');
+  const first = Number.parseInt(parts[0] || '', 10);
+  const second = Number.parseInt(parts[1] || '', 10);
+  const third = Number.parseInt((parts[2] || '0').split('-')[0], 10);
+
+  // Calendar-based Minecraft releases starting in 2026 (26.1, 26.2, 26.3, etc.)
+  if (Number.isFinite(first) && first >= 26 && first < 100) {
+    return 25;
+  }
+  // Snapshots from 26w+
+  const snapMatch = /^(\d{2})w(\d{2})[a-z]?$/i.exec(raw);
+  if (snapMatch) {
+    const yy = Number.parseInt(snapMatch[1], 10);
+    if (yy >= 26) return 25;
+    if (yy >= 24) return 21;
+    if (yy >= 21) return 17;
+    return 8;
+  }
+  if (first === 1 && Number.isFinite(second)) {
+    if (second <= 16) return 8;
+    if (second <= 19 || (second === 20 && (Number.isNaN(third) || third <= 4))) return 17;
+    return 21;
+  }
+  return 21;
+}
+
+export function parseProfileVersionId(rawVersionId: string): {
+  mcVersion: string;
+  loader: SupportedLoaderId;
+  loaderVersion: string | null;
+} {
+  const v = String(rawVersionId || '').trim();
+  const fabricMatch = /^fabric-([^-]+)-(.+)$/.exec(v);
+  if (fabricMatch) {
+    return { mcVersion: fabricMatch[2], loader: 'fabric', loaderVersion: fabricMatch[1] };
+  }
+  const quiltMatch = /^quilt-([^-]+)-(.+)$/.exec(v);
+  if (quiltMatch) {
+    return { mcVersion: quiltMatch[2], loader: 'quilt', loaderVersion: quiltMatch[1] };
+  }
+  const neoforgeMatch = /^neoforge-(.+)-(.+)$/.exec(v);
+  if (neoforgeMatch) {
+    return { mcVersion: neoforgeMatch[2], loader: 'neoforge', loaderVersion: neoforgeMatch[1] };
+  }
+  const forgeMatch = /^forge-(.+)-(.+)$/.exec(v);
+  if (forgeMatch) {
+    return { mcVersion: forgeMatch[2], loader: 'forge', loaderVersion: forgeMatch[1] };
+  }
+  return { mcVersion: v || '1.21.4', loader: 'vanilla', loaderVersion: null };
+}
+
 // --- Pure PNG 64x64 RGBA skin synthesizer (for official default skins Steve & Alex) ---
 
 const CRC_TABLE = (() => {

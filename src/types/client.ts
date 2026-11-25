@@ -37,6 +37,9 @@ export interface VideoSettings {
   entityDistanceScaling: number; // 50 to 200%
   guiScale: number; // 1 to 4
   fullbright: boolean;
+  viewBobbing?: boolean;
+  mipmapZero?: boolean;
+  disableVisualEffects?: boolean;
 }
 
 export interface JvmConfig {

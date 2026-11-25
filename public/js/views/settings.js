@@ -171,12 +171,12 @@
           <div class="settings-row">
             <div>
               <h4>Al iniciar Minecraft (estilo SKLauncher)</h4>
-              <p>Cerrar el launcher al entrar al juego libera toda la RAM del navegador para exprimir más FPS.</p>
+              <p>Cerrar la ventana del launcher al jugar libera toda la RAM del navegador y vuelve a abrirse automáticamente al cerrar Minecraft.</p>
             </div>
             <div class="field">
               <label class="sr-only" for="close-behavior-select">Comportamiento al iniciar Minecraft</label>
               <select id="close-behavior-select">
-                <option value="quit"${closeBehavior === 'quit' ? ' selected' : ''}>Cerrar launcher al jugar</option>
+                <option value="quit"${closeBehavior === 'quit' ? ' selected' : ''}>Cerrar al jugar y reabrir al salir</option>
                 <option value="minimize"${closeBehavior === 'minimize' ? ' selected' : ''}>Minimizar al jugar</option>
                 <option value="keep"${closeBehavior === 'keep' ? ' selected' : ''}>Mantener abierto</option>
               </select>

@@ -77,7 +77,7 @@
   }
 
   const CLOSE_BEHAVIOR_META = Object.freeze({
-    quit: { label: 'Cerrar launcher al jugar', short: 'Cerrar al iniciar', icon: 'power' },
+    quit: { label: 'Cerrar launcher al jugar (vuelve al salir)', short: 'Cerrar y volver al salir', icon: 'power' },
     minimize: { label: 'Minimizar al jugar', short: 'Minimizar al iniciar', icon: 'layers' },
     keep: { label: 'Mantener abierto al jugar', short: 'Mantener abierto', icon: 'shield' }
   });
@@ -85,6 +85,101 @@
   function closeBehaviorMeta(value) {
     return CLOSE_BEHAVIOR_META[value] || CLOSE_BEHAVIOR_META.quit;
   }
+
+  const LOADER_OPTIONS = Object.freeze([
+    { id: 'vanilla', label: 'Vanilla' },
+    { id: 'fabric', label: 'Fabric' },
+    { id: 'forge', label: 'Forge' },
+    { id: 'neoforge', label: 'NeoForge' },
+    { id: 'quilt', label: 'Quilt' }
+  ]);
+
+  function loaderLabelFor(id) {
+    const found = LOADER_OPTIONS.find((item) => item.id === String(id || 'vanilla').toLowerCase());
+    return found ? found.label : 'Vanilla';
+  }
+
+  function resolveActiveLaunchProfile(state) {
+    const config = state.config || {};
+    const launchCfg = config.launch || {};
+    const list = (state.installations && state.installations.list) || [];
+    const activeInst = list.find((item) => item.id === launchCfg.activeInstallationId) || null;
+    if (activeInst) {
+      return {
+        isInstallation: true,
+        installationName: activeInst.name,
+        gameVersion: activeInst.gameVersion || activeInst.versionId,
+        loader: String(activeInst.loader || 'vanilla').toLowerCase(),
+        loaderVersion: activeInst.loaderVersion || null
+      };
+    }
+    const rawVer = String(launchCfg.versionId || '1.21.4');
+    const match = rawVer.match(/^(fabric|forge|neoforge|quilt)-(.+)-([^-]+)$/i);
+    if (match) {
+      return {
+        isInstallation: false,
+        installationName: null,
+        gameVersion: match[3],
+        loader: match[1].toLowerCase(),
+        loaderVersion: match[2]
+      };
+    }
+    return {
+      isInstallation: false,
+      installationName: null,
+      gameVersion: rawVer,
+      loader: String(launchCfg.loader || 'vanilla').toLowerCase(),
+      loaderVersion: launchCfg.loaderVersion || null
+    };
+  }
+
+  Nexus.views.loaderSwitcherBar = function (state, compact) {
+    const profile = resolveActiveLaunchProfile(state);
+    const dl = state.directLoader || { state: 'idle', items: [], error: '' };
+    const selectedBuild = (state.config && state.config.launch && state.config.launch.loaderVersion) || '';
+    const items = Array.isArray(dl.items) ? dl.items.slice(0, 40) : [];
+
+    return `
+      <section class="panel loader-switcher-bar${compact ? ' is-compact' : ''}" aria-label="Selector de cargador de mods">
+        <div class="loader-switcher-main">
+          <div class="loader-switcher-copy">
+            <strong>Cargador de mods</strong>
+            <span>${profile.isInstallation
+              ? `Perfil aislado "${escapeHtml(profile.installationName)}" (${escapeHtml(loaderLabelFor(profile.loader))})`
+              : `Versión ${escapeHtml(profile.gameVersion)} · ${escapeHtml(loaderLabelFor(profile.loader))}`}</span>
+          </div>
+          <div class="loader-segmented" role="group" aria-label="Elegir cargador">
+            ${LOADER_OPTIONS.map((item) => {
+              const isActive = profile.loader === item.id;
+              return `
+                <button type="button"
+                        class="loader-seg-btn${isActive ? ' active' : ''}"
+                        data-action="set-launch-loader"
+                        data-loader="${escapeHtml(item.id)}"
+                        aria-pressed="${isActive}">
+                  ${escapeHtml(item.label)}
+                </button>`;
+            }).join('')}
+          </div>
+        </div>
+        ${!profile.isInstallation && profile.loader !== 'vanilla' ? `
+          <div class="loader-switcher-build">
+            <label for="home-loader-version">Versión de ${escapeHtml(loaderLabelFor(profile.loader))}:</label>
+            <div class="loader-build-controls">
+              <select id="home-loader-version" class="loader-version-select" ${dl.state === 'loading' ? 'disabled' : ''}>
+                ${dl.state === 'loading'
+                  ? '<option value="">Cargando builds oficiales…</option>'
+                  : `<option value="">Automática (más estable)</option>${items.map((b) => `
+                      <option value="${escapeHtml(b.id)}"${selectedBuild === b.id ? ' selected' : ''}>${escapeHtml(b.label || b.id)}${b.stable ? ' (Estable)' : ''}</option>`).join('')}`}
+              </select>
+              <button type="button" class="btn btn-xs" data-action="refresh-direct-loader-catalog" aria-label="Actualizar builds compatibles" title="Actualizar builds compatibles">
+                <span data-icon="refresh"></span>
+              </button>
+            </div>
+            ${dl.error && dl.state !== 'loading' ? `<small class="loader-build-note">${escapeHtml(dl.error)}</small>` : ''}
+          </div>` : ''}
+      </section>`;
+  };
 
   Nexus.views.launchPanel = function (state) {
     const launch = state.launch || {};
@@ -94,6 +189,8 @@
     const phase = status.status || 'idle';
     const reasons = Array.isArray(preflight.reasons) ? preflight.reasons : [];
     const versionId = active ? active.versionId : (status.versionId || state.config.launch.versionId);
+    const activeProfile = resolveActiveLaunchProfile(state);
+    const loaderDisplay = loaderLabelFor(activeProfile.loader) + (activeProfile.loaderVersion ? ` ${activeProfile.loaderVersion}` : '');
     const perfEval = Nexus.perfEngine ? Nexus.perfEngine.evaluateFromConfig(state.config) : null;
     const closeMeta = closeBehaviorMeta(state.config && state.config.general && state.config.general.closeBehavior);
 
@@ -127,6 +224,7 @@
 
         <div class="launch-meta tabular">
           <span><strong>Versión:</strong> ${escapeHtml(versionId)}</span>
+          <span><strong>Cargador:</strong> ${escapeHtml(loaderDisplay)}</span>
           <span><strong>Modo cuenta:</strong> ${active && active.mode ? escapeHtml(active.mode === 'offline' ? 'Offline' : 'Online') : escapeHtml(state.session && state.session.mode === 'offline' ? 'Offline' : 'Online')}</span>
           ${perfEval ? `<span><strong>Perfil:</strong> ${escapeHtml(perfEval.presetName)} (${escapeHtml(perfEval.jvm.gc)})</span>` : ''}
           <span><strong>Al iniciar juego:</strong> ${escapeHtml(closeMeta.short)}</span>
@@ -156,6 +254,8 @@
     const config = state.config;
     const selected = state.versions.find((item) => item.id === config.launch.versionId) || state.versions[0];
     const version = selected ? selected.id : (config.launch.versionId || '—');
+    const activeProfile = resolveActiveLaunchProfile(state);
+    const loaderTag = loaderLabelFor(activeProfile.loader);
     const ram = formatRam(config.launch.ramMb);
     const auth = state.auth || {};
     const sessionState = state.session || { mode: 'online', profile: null };
@@ -214,7 +314,7 @@
             <div class="stat-icon"><span data-icon="cube"></span></div>
             <div>
               <div class="stat-label">${escapeHtml(versionLabel)}</div>
-              <div class="stat-value tabular">${escapeHtml(version)}</div>
+              <div class="stat-value tabular">${escapeHtml(version)} · ${escapeHtml(loaderTag)}</div>
             </div>
           </article>
           <article class="stat-card">
@@ -239,6 +339,8 @@
             </div>
           </article>
         </section>
+
+        ${Nexus.views.loaderSwitcherBar(state, false)}
 
         <div id="launch-panel">${Nexus.views.launchPanel(state)}</div>
 

@@ -51,15 +51,20 @@
     const visibleCatalog = catalog.slice(0, limit);
     const installedProfiles = (loaders.status && loaders.status.installed || []).filter((p) => {
       if (kind === 'fabric') return p.loader === 'fabric';
-      return p.loader === 'forge' || p.loader === 'neoforge';
+      return p.loader === 'forge' || p.loader === 'neoforge' || p.loader === 'quilt';
     });
     const activeVersionId = state.config && state.config.launch ? state.config.launch.versionId : '';
 
     const titleMap = {
       fabric: 'Instalación de Fabric',
-      forge: 'Forge y NeoForge',
-      neoforge: 'Forge y NeoForge'
+      forge: 'Forge, NeoForge y Quilt',
+      neoforge: 'Forge, NeoForge y Quilt',
+      quilt: 'Forge, NeoForge y Quilt'
     };
+
+    const activeModLoader = kind === 'fabric'
+      ? 'Fabric'
+      : (loaders.loader === 'neoforge' ? 'NeoForge' : loaders.loader === 'quilt' ? 'Quilt' : 'Forge');
 
     return `
       <div class="page">
@@ -69,13 +74,15 @@
           titleMap[kind] || 'Cargador de mods',
           kind === 'fabric'
             ? 'Instala Fabric Loader oficial para ejecutar Sodium, Lithium y paquetes FPS.'
-            : 'Alterna entre Forge y NeoForge usando los metadatos oficiales de Maven.',
+            : 'Alterna entre Forge, NeoForge y Quilt usando sus metadatos oficiales.',
           kind !== 'fabric'
             ? `<div class="loader-switch">
-                 <button type="button" class="btn btn-sm ${loaders.loader !== 'neoforge' ? 'btn-primary' : ''}"
+                 <button type="button" class="btn btn-sm ${loaders.loader !== 'neoforge' && loaders.loader !== 'quilt' ? 'btn-primary' : ''}"
                          data-action="loader-switch" data-loader="forge">Forge</button>
                  <button type="button" class="btn btn-sm ${loaders.loader === 'neoforge' ? 'btn-primary' : ''}"
                          data-action="loader-switch" data-loader="neoforge">NeoForge</button>
+                 <button type="button" class="btn btn-sm ${loaders.loader === 'quilt' ? 'btn-primary' : ''}"
+                         data-action="loader-switch" data-loader="quilt">Quilt</button>
                </div>`
             : ''
         )}
@@ -87,7 +94,7 @@
         <section class="panel">
           <div class="panel-head">
             <div>
-              <h3>Instalar ${escapeHtml(kind === 'fabric' ? 'Fabric' : (loaders.loader === 'neoforge' ? 'NeoForge' : 'Forge'))}</h3>
+              <h3>Instalar ${escapeHtml(activeModLoader)}</h3>
               <p>Selecciona la versión de Minecraft y la build del cargador.</p>
             </div>
             <button type="button" class="btn btn-xs" data-action="loader-refresh" data-loader="${escapeHtml(kind)}">

@@ -46,6 +46,8 @@ typedef struct {
   int initialized;
   volatile LONG launching;
   volatile LONG stop_requested;
+  volatile LONG user_stopped;
+  PanMcReopenUiFn reopen_ui_cb;
   char state[32];
   int progress;
   char step[512];
@@ -57,6 +59,7 @@ typedef struct {
   int log_count;
   wchar_t base_dir[MAX_PATH];
   HANDLE worker_thread;
+  HANDLE child_process;
   char* pending_req_json;
   size_t pending_req_len;
 } PanMcEngine;
@@ -168,6 +171,10 @@ void pan_mc_init(const wchar_t* base_dir) {
     wcsncpy(g_mc.base_dir, base_dir, MAX_PATH - 1);
     g_mc.base_dir[MAX_PATH - 1] = L'\0';
   }
+}
+
+void pan_mc_set_reopen_ui_cb(PanMcReopenUiFn cb) {
+  g_mc.reopen_ui_cb = cb;
 }
 
 void pan_mc_get_status_json(char* out_buf, size_t out_cap) {
@@ -630,9 +637,10 @@ static int http_download_file(
   return 0;
 }
 
-static PanJsonValue* http_get_json(
+static char* http_get_text(
     HINTERNET hSession,
     const char* url,
+    size_t* out_len,
     char* err_buf,
     size_t err_cap) {
   for (int attempt = 1; attempt <= 2; attempt++) {
@@ -640,11 +648,8 @@ static PanJsonValue* http_get_json(
     size_t mlen = 0;
     char local_err[256] = {0};
     if (http_fetch_once(hSession, url, NULL, &mem, &mlen, local_err, sizeof(local_err))) {
-      PanJsonValue* v = pan_json_parse(mem, mlen);
-      free(mem);
-      if (v) return v;
-      if (err_buf) _snprintf(err_buf, err_cap, "JSON inválido desde %s", url);
-      return NULL;
+      if (out_len) *out_len = mlen;
+      return mem;
     }
     if (attempt == 2 && err_buf) {
       _snprintf(err_buf, err_cap, "Error consultando %s: %s", url, local_err);
@@ -652,6 +657,20 @@ static PanJsonValue* http_get_json(
     Sleep(300);
   }
   return NULL;
+}
+
+static PanJsonValue* http_get_json(
+    HINTERNET hSession,
+    const char* url,
+    char* err_buf,
+    size_t err_cap) {
+  size_t mlen = 0;
+  char* mem = http_get_text(hSession, url, &mlen, err_buf, err_cap);
+  if (!mem) return NULL;
+  PanJsonValue* v = pan_json_parse(mem, mlen);
+  free(mem);
+  if (!v && err_buf) _snprintf(err_buf, err_cap, "JSON inválido desde %s", url);
+  return v;
 }
 
 /* =========================================================================
@@ -779,8 +798,24 @@ static int extract_native_dll_cb(
   wchar_t dest[MAX_PATH];
   _snwprintf(dest, MAX_PATH, L"%ls\\%ls", natives_dir, wbase);
   dest[MAX_PATH - 1] = L'\0';
-  if (file_exists_nonempty_w(dest)) return 1;
   return write_entire_file_w(dest, data, data_len);
+}
+
+static void clean_natives_dir_w(const wchar_t* natives_dir) {
+  wchar_t pattern[MAX_PATH];
+  _snwprintf(pattern, MAX_PATH, L"%ls\\*", natives_dir);
+  pattern[MAX_PATH - 1] = L'\0';
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW(pattern, &fd);
+  if (h == INVALID_HANDLE_VALUE) return;
+  do {
+    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+    wchar_t full[MAX_PATH];
+    _snwprintf(full, MAX_PATH, L"%ls\\%ls", natives_dir, fd.cFileName);
+    full[MAX_PATH - 1] = L'\0';
+    DeleteFileW(full);
+  } while (FindNextFileW(h, &fd));
+  FindClose(h);
 }
 
 static void extract_native_jar_dlls(const wchar_t* jar_path, const wchar_t* natives_dir) {
@@ -895,14 +930,36 @@ static int probe_java_major(const wchar_t* exe_path) {
   return major;
 }
 
-static int find_matching_javaw_in_tree(const wchar_t* dir, int min_major, int depth, wchar_t* out_path, size_t cap) {
+static int java_matches_req(int major, int req_major) {
+  if (major <= 0) return 0;
+  if (req_major >= 25) return major >= req_major;
+  return major == req_major;
+}
+
+static void javaw_to_java_exe(const wchar_t* javaw_path, wchar_t* out_java, size_t cap) {
+  wcsncpy(out_java, javaw_path, cap - 1);
+  out_java[cap - 1] = L'\0';
+  size_t len = wcslen(out_java);
+  if (len >= 9 && _wcsicmp(out_java + len - 9, L"javaw.exe") == 0) {
+    wchar_t cand[MAX_PATH];
+    wcsncpy(cand, out_java, MAX_PATH - 1);
+    cand[MAX_PATH - 1] = L'\0';
+    wcscpy(cand + len - 9, L"java.exe");
+    if (file_exists_nonempty_w(cand)) {
+      wcsncpy(out_java, cand, cap - 1);
+      out_java[cap - 1] = L'\0';
+    }
+  }
+}
+
+static int find_matching_javaw_in_tree(const wchar_t* dir, int req_major, int depth, wchar_t* out_path, size_t cap) {
   if (!dir || !dir[0] || depth > 4) return 0;
   wchar_t direct[MAX_PATH];
   _snwprintf(direct, MAX_PATH, L"%ls\\bin\\javaw.exe", dir);
   direct[MAX_PATH - 1] = L'\0';
   if (file_exists_nonempty_w(direct)) {
     int m = probe_java_major(direct);
-    if (m >= min_major) {
+    if (java_matches_req(m, req_major)) {
       wcsncpy(out_path, direct, cap - 1);
       out_path[cap - 1] = L'\0';
       return 1;
@@ -912,7 +969,7 @@ static int find_matching_javaw_in_tree(const wchar_t* dir, int min_major, int de
   direct[MAX_PATH - 1] = L'\0';
   if (file_exists_nonempty_w(direct)) {
     int m = probe_java_major(direct);
-    if (m >= min_major) {
+    if (java_matches_req(m, req_major)) {
       wcsncpy(out_path, direct, cap - 1);
       out_path[cap - 1] = L'\0';
       return 1;
@@ -932,7 +989,7 @@ static int find_matching_javaw_in_tree(const wchar_t* dir, int min_major, int de
     wchar_t sub[MAX_PATH];
     _snwprintf(sub, MAX_PATH, L"%ls\\%ls", dir, fd.cFileName);
     sub[MAX_PATH - 1] = L'\0';
-    if (find_matching_javaw_in_tree(sub, min_major, depth + 1, out_path, cap)) {
+    if (find_matching_javaw_in_tree(sub, req_major, depth + 1, out_path, cap)) {
       found = 1;
       break;
     }
@@ -941,12 +998,12 @@ static int find_matching_javaw_in_tree(const wchar_t* dir, int min_major, int de
   return found;
 }
 
-static int find_system_javaw(int min_major, const char* custom_path_utf8, wchar_t* out_path, size_t cap) {
+static int find_system_javaw(int req_major, const char* custom_path_utf8, wchar_t* out_path, size_t cap) {
   if (custom_path_utf8 && custom_path_utf8[0]) {
     wchar_t wcustom[MAX_PATH];
     if (utf8_to_wide(custom_path_utf8, wcustom, MAX_PATH) && file_exists_nonempty_w(wcustom)) {
       int m = probe_java_major(wcustom);
-      if (m >= min_major || m == 0) {
+      if (java_matches_req(m, req_major) || m == 0) {
         wcsncpy(out_path, wcustom, cap - 1);
         out_path[cap - 1] = L'\0';
         return 1;
@@ -956,7 +1013,7 @@ static int find_system_javaw(int min_major, const char* custom_path_utf8, wchar_
 
   wchar_t env_val[MAX_PATH] = {0};
   if (GetEnvironmentVariableW(L"JAVA_HOME", env_val, MAX_PATH) > 0) {
-    if (find_matching_javaw_in_tree(env_val, min_major, 0, out_path, cap)) return 1;
+    if (find_matching_javaw_in_tree(env_val, req_major, 0, out_path, cap)) return 1;
   }
 
   const wchar_t* roots[2] = {NULL, NULL};
@@ -980,7 +1037,7 @@ static int find_system_javaw(int min_major, const char* custom_path_utf8, wchar_
       wchar_t vdir[MAX_PATH];
       _snwprintf(vdir, MAX_PATH, L"%ls\\%ls", roots[r], VENDORS[v]);
       vdir[MAX_PATH - 1] = L'\0';
-      if (find_matching_javaw_in_tree(vdir, min_major, 0, out_path, cap)) return 1;
+      if (find_matching_javaw_in_tree(vdir, req_major, 0, out_path, cap)) return 1;
     }
   }
 
@@ -989,19 +1046,19 @@ static int find_system_javaw(int min_major, const char* custom_path_utf8, wchar_
     wchar_t ad_dir[MAX_PATH];
     _snwprintf(ad_dir, MAX_PATH, L"%ls\\Programs\\Eclipse Adoptium", localapp);
     ad_dir[MAX_PATH - 1] = L'\0';
-    if (find_matching_javaw_in_tree(ad_dir, min_major, 0, out_path, cap)) return 1;
+    if (find_matching_javaw_in_tree(ad_dir, req_major, 0, out_path, cap)) return 1;
   }
   if (GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH) > 0) {
     wchar_t mc_rt[MAX_PATH];
     _snwprintf(mc_rt, MAX_PATH, L"%ls\\.minecraft\\runtime", appdata);
     mc_rt[MAX_PATH - 1] = L'\0';
-    if (find_matching_javaw_in_tree(mc_rt, min_major, 0, out_path, cap)) return 1;
+    if (find_matching_javaw_in_tree(mc_rt, req_major, 0, out_path, cap)) return 1;
   }
 
   wchar_t path_hit[MAX_PATH] = {0};
   if (SearchPathW(NULL, L"javaw.exe", NULL, MAX_PATH, path_hit, NULL) > 0) {
     int m = probe_java_major(path_hit);
-    if (m >= min_major) {
+    if (java_matches_req(m, req_major)) {
       wcsncpy(out_path, path_hit, cap - 1);
       out_path[cap - 1] = L'\0';
       return 1;
@@ -1044,10 +1101,17 @@ static void split_ga_key(const char* maven_name, char* out_ga, size_t cap) {
     return;
   }
   const char* c2 = strchr(c1 + 1, ':');
-  size_t n = c2 ? (size_t)(c2 - maven_name) : strlen(maven_name);
-  if (n >= cap) n = cap - 1;
-  memcpy(out_ga, maven_name, n);
-  out_ga[n] = '\0';
+  size_t ga_len = c2 ? (size_t)(c2 - maven_name) : strlen(maven_name);
+  if (ga_len >= cap) ga_len = cap - 1;
+  memcpy(out_ga, maven_name, ga_len);
+  out_ga[ga_len] = '\0';
+  if (c2) {
+    const char* c3 = strchr(c2 + 1, ':');
+    if (c3 && c3[1] && ga_len + 1 + strlen(c3) < cap) {
+      out_ga[ga_len] = ':';
+      strcpy(out_ga + ga_len + 1, c3 + 1);
+    }
+  }
 }
 
 static int maven_coord_to_rel_path(const char* coord, char* out, size_t cap) {
@@ -1141,7 +1205,7 @@ static DWORD WINAPI dl_pool_worker(LPVOID param) {
     LONG done = InterlockedIncrement(&pool->done_cnt);
     if (pool->count > 0 && (done % 40 == 0 || (size_t)done == pool->count)) {
       int pct = pool->base_pct + (int)(((double)done / (double)pool->count) * pool->span_pct);
-      set_pan_statusf("downloading", pct, "%s: %ld / %zu...", pool->label, done, pool->count);
+      set_pan_statusf("downloading", pct, "%s: %ld / %llu...", pool->label, done, (unsigned long long)pool->count);
     }
   }
 
@@ -1206,6 +1270,164 @@ static void read_log_tail_safe(const wchar_t* path, char* out, size_t cap) {
   }
   out[j] = '\0';
   free(raw);
+}
+
+static void read_log_head_safe(const wchar_t* path, char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  out[0] = '\0';
+  size_t len = 0;
+  uint8_t* raw = read_entire_file_w(path, &len);
+  if (!raw || len == 0) {
+    free(raw);
+    return;
+  }
+  size_t lim = len > 1400 ? 1400 : len;
+  size_t j = 0;
+  for (size_t i = 0; i < lim && j + 2 < cap; i++) {
+    char c = (char)raw[i];
+    if (c == '\r') continue;
+    if (c == '\n') c = ' ';
+    out[j++] = c;
+  }
+  out[j] = '\0';
+  free(raw);
+}
+
+static int find_newest_file_w(const wchar_t* dir, const wchar_t* glob_pat, wchar_t* out_path, size_t cap) {
+  wchar_t search[MAX_PATH];
+  _snwprintf(search, MAX_PATH, L"%ls\\%ls", dir, glob_pat);
+  search[MAX_PATH - 1] = L'\0';
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW(search, &fd);
+  if (h == INVALID_HANDLE_VALUE) return 0;
+  FILETIME best_ft = {0, 0};
+  int found = 0;
+  do {
+    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+    if (!found || CompareFileTime(&fd.ftLastWriteTime, &best_ft) > 0) {
+      best_ft = fd.ftLastWriteTime;
+      _snwprintf(out_path, cap, L"%ls\\%ls", dir, fd.cFileName);
+      out_path[cap - 1] = L'\0';
+      found = 1;
+    }
+  } while (FindNextFileW(h, &fd));
+  FindClose(h);
+  return found;
+}
+
+static void find_crash_tail_w(
+    const wchar_t* instance_dir,
+    const wchar_t* err_log,
+    const wchar_t* out_log,
+    char* out,
+    size_t cap) {
+  if (!out || cap == 0) return;
+  out[0] = '\0';
+  wchar_t newest[MAX_PATH];
+  wchar_t cr_dir[MAX_PATH];
+  _snwprintf(cr_dir, MAX_PATH, L"%ls\\crash-reports", instance_dir);
+  if (find_newest_file_w(instance_dir, L"hs_err_pid*.log", newest, MAX_PATH)) {
+    read_log_head_safe(newest, out, cap);
+    if (out[0]) return;
+  }
+  if (find_newest_file_w(cr_dir, L"crash-*.txt", newest, MAX_PATH)) {
+    read_log_head_safe(newest, out, cap);
+    if (out[0]) return;
+  }
+  read_log_tail_safe(err_log, out, cap);
+  if (out[0]) return;
+  {
+    wchar_t mc_log[MAX_PATH];
+    _snwprintf(mc_log, MAX_PATH, L"%ls\\logs\\latest.log", instance_dir);
+    read_log_tail_safe(mc_log, out, cap);
+    if (out[0]) return;
+  }
+  read_log_tail_safe(out_log, out, cap);
+}
+
+static void merge_options_txt_w(const wchar_t* opt_path, const char* new_txt) {
+  if (!new_txt || !new_txt[0]) return;
+  size_t ex_len = 0;
+  uint8_t* ex_raw = read_entire_file_w(opt_path, &ex_len);
+  if (!ex_raw || ex_len == 0) {
+    free(ex_raw);
+    write_entire_file_w(opt_path, new_txt, strlen(new_txt));
+    return;
+  }
+
+  PanStrList lines = {0};
+  {
+    char* ex_str = (char*)malloc(ex_len + 1);
+    if (!ex_str) {
+      free(ex_raw);
+      return;
+    }
+    memcpy(ex_str, ex_raw, ex_len);
+    ex_str[ex_len] = '\0';
+    free(ex_raw);
+    char* cur = ex_str;
+    while (*cur) {
+      char* nl = strchr(cur, '\n');
+      if (nl) *nl = '\0';
+      size_t ll = strlen(cur);
+      while (ll > 0 && cur[ll - 1] == '\r') cur[--ll] = '\0';
+      if (cur[0]) strlist_add(&lines, cur);
+      if (!nl) break;
+      cur = nl + 1;
+    }
+    free(ex_str);
+  }
+
+  {
+    char* nw = xstrdup(new_txt);
+    if (nw) {
+      char* cur = nw;
+      while (*cur) {
+        char* nl = strchr(cur, '\n');
+        if (nl) *nl = '\0';
+        size_t ll = strlen(cur);
+        while (ll > 0 && cur[ll - 1] == '\r') cur[--ll] = '\0';
+        if (cur[0] && cur[0] != '#') {
+          char* colon = strchr(cur, ':');
+          if (colon && colon > cur) {
+            size_t klen = (size_t)(colon - cur);
+            int replaced = 0;
+            for (size_t i = 0; i < lines.count; i++) {
+              if (strncmp(lines.items[i], cur, klen) == 0 && lines.items[i][klen] == ':') {
+                free(lines.items[i]);
+                lines.items[i] = xstrdup(cur);
+                replaced = 1;
+                break;
+              }
+            }
+            if (!replaced) strlist_add(&lines, cur);
+          }
+        }
+        if (!nl) break;
+        cur = nl + 1;
+      }
+      free(nw);
+    }
+  }
+
+  size_t total = 1;
+  for (size_t i = 0; i < lines.count; i++) {
+    total += strlen(lines.items[i]) + 1;
+  }
+  char* merged = (char*)malloc(total + 1);
+  if (merged) {
+    size_t pos = 0;
+    for (size_t i = 0; i < lines.count; i++) {
+      size_t ll = strlen(lines.items[i]);
+      memcpy(merged + pos, lines.items[i], ll);
+      pos += ll;
+      merged[pos++] = '\n';
+    }
+    merged[pos] = '\0';
+    write_entire_file_w(opt_path, merged, pos);
+    free(merged);
+  }
+  strlist_free(&lines);
 }
 
 static char* build_quoted_argfile(const PanStrList* args) {
@@ -1315,19 +1537,289 @@ static const char* map_mod_slug(const char* mod_id) {
   return NULL;
 }
 
+static int download_maven_lib(
+    HINTERNET hSession,
+    const char* name,
+    const char* url_base,
+    const wchar_t* libs_dir,
+    PanCpMap* cp_map,
+    char* err_buf,
+    size_t err_cap) {
+  char rel[512];
+  if (!maven_coord_to_rel_path(name, rel, sizeof(rel))) return 0;
+  wchar_t wrel[MAX_PATH], dest[MAX_PATH];
+  utf8_to_wide(rel, wrel, MAX_PATH);
+  for (int k = 0; wrel[k]; k++) if (wrel[k] == L'/') wrel[k] = L'\\';
+  _snwprintf(dest, MAX_PATH, L"%ls\\%ls", libs_dir, wrel);
+  dest[MAX_PATH - 1] = L'\0';
+
+  if (file_exists_nonempty_w(dest)) {
+    char ga[256];
+    split_ga_key(name, ga, sizeof(ga));
+    cpmap_set(cp_map, ga, dest);
+    return 1;
+  }
+
+  const char* repos[4] = {
+    (url_base && url_base[0]) ? url_base : NULL,
+    "https://maven.minecraftforge.net/",
+    "https://libraries.minecraft.net/",
+    "https://repo1.maven.org/maven2/"
+  };
+  for (int r = 0; r < 4; r++) {
+    if (!repos[r]) continue;
+    char full_url[768];
+    size_t blen = strlen(repos[r]);
+    snprintf(full_url, sizeof(full_url), "%s%s%s",
+             repos[r], (blen > 0 && repos[r][blen - 1] == '/') ? "" : "/", rel);
+    char local_err[256] = {0};
+    if (http_download_file(hSession, full_url, dest, NULL, local_err, sizeof(local_err))) {
+      char ga[256];
+      split_ga_key(name, ga, sizeof(ga));
+      cpmap_set(cp_map, ga, dest);
+      return 1;
+    }
+  }
+  if (err_buf) {
+    _snprintf(err_buf, err_cap, "No se pudo descargar la librería %s", name);
+  }
+  return 0;
+}
+
+static int apply_loader_json_libs(
+    HINTERNET hSession,
+    const PanJsonValue* ljson,
+    const wchar_t* libs_dir,
+    PanCpMap* cp_map,
+    char* main_class,
+    size_t main_cap,
+    char* version_name,
+    size_t vn_cap,
+    PanStrList* extra_jvm,
+    PanStrList* extra_game,
+    char* err_buf,
+    size_t err_cap) {
+  if (!ljson || ljson->type != PAN_JSON_OBJECT) return 0;
+  const char* lid = pan_json_str(pan_json_get(ljson, "id"), NULL);
+  if (lid && lid[0] && version_name && vn_cap > 0) {
+    strncpy(version_name, lid, vn_cap - 1);
+    version_name[vn_cap - 1] = '\0';
+  }
+  const char* mc = pan_json_str(pan_json_get(ljson, "mainClass"), NULL);
+  if (mc && mc[0]) {
+    strncpy(main_class, mc, main_cap - 1);
+    main_class[main_cap - 1] = '\0';
+  }
+
+  const PanJsonValue* libs = pan_json_get(ljson, "libraries");
+  if (libs && libs->type == PAN_JSON_ARRAY) {
+    for (size_t i = 0; i < libs->u.arr.count; i++) {
+      const PanJsonValue* lib = libs->u.arr.items[i];
+      if (!test_mojang_rules(pan_json_get(lib, "rules"))) continue;
+      const char* lname = pan_json_str(pan_json_get(lib, "name"), "");
+      if (!lname[0]) continue;
+      const PanJsonValue* art = pan_json_get(pan_json_get(lib, "downloads"), "artifact");
+      if (art) {
+        const char* aurl = pan_json_str(pan_json_get(art, "url"), "");
+        const char* apath = pan_json_str(pan_json_get(art, "path"), "");
+        const char* asha = pan_json_str(pan_json_get(art, "sha1"), "");
+        if (apath[0]) {
+          wchar_t wrel[MAX_PATH], dest[MAX_PATH];
+          utf8_to_wide(apath, wrel, MAX_PATH);
+          for (int k = 0; wrel[k]; k++) if (wrel[k] == L'/') wrel[k] = L'\\';
+          _snwprintf(dest, MAX_PATH, L"%ls\\%ls", libs_dir, wrel);
+          dest[MAX_PATH - 1] = L'\0';
+          if (file_exists_nonempty_w(dest)) {
+            char ga[256];
+            split_ga_key(lname, ga, sizeof(ga));
+            cpmap_set(cp_map, ga, dest);
+            continue;
+          }
+          if (aurl[0] && http_download_file(hSession, aurl, dest, asha, err_buf, err_cap)) {
+            char ga[256];
+            split_ga_key(lname, ga, sizeof(ga));
+            cpmap_set(cp_map, ga, dest);
+            continue;
+          }
+        }
+      }
+      const char* base_url = pan_json_str(pan_json_get(lib, "url"), "");
+      download_maven_lib(hSession, lname, base_url, libs_dir, cp_map, err_buf, err_cap);
+    }
+  }
+
+  const PanJsonValue* args_obj = pan_json_get(ljson, "arguments");
+  if (args_obj) {
+    const PanJsonValue* ajvm = pan_json_get(args_obj, "jvm");
+    if (ajvm && ajvm->type == PAN_JSON_ARRAY) {
+      for (size_t i = 0; i < ajvm->u.arr.count; i++) {
+        const PanJsonValue* item = ajvm->u.arr.items[i];
+        if (item->type == PAN_JSON_STRING && item->u.str && item->u.str[0]) {
+          strlist_add(extra_jvm, item->u.str);
+        } else if (item->type == PAN_JSON_OBJECT && test_mojang_rules(pan_json_get(item, "rules"))) {
+          const PanJsonValue* val = pan_json_get(item, "value");
+          if (val && val->type == PAN_JSON_STRING && val->u.str && val->u.str[0]) {
+            strlist_add(extra_jvm, val->u.str);
+          } else if (val && val->type == PAN_JSON_ARRAY) {
+            for (size_t k = 0; k < val->u.arr.count; k++) {
+              const char* vs = pan_json_str(val->u.arr.items[k], NULL);
+              if (vs && vs[0]) strlist_add(extra_jvm, vs);
+            }
+          }
+        }
+      }
+    }
+    const PanJsonValue* agame = pan_json_get(args_obj, "game");
+    if (agame && agame->type == PAN_JSON_ARRAY) {
+      for (size_t i = 0; i < agame->u.arr.count; i++) {
+        const PanJsonValue* item = agame->u.arr.items[i];
+        if (item->type == PAN_JSON_STRING && item->u.str && item->u.str[0]) {
+          strlist_add(extra_game, item->u.str);
+        } else if (item->type == PAN_JSON_OBJECT && test_mojang_rules(pan_json_get(item, "rules"))) {
+          const PanJsonValue* val = pan_json_get(item, "value");
+          if (val && val->type == PAN_JSON_STRING && val->u.str && val->u.str[0]) {
+            strlist_add(extra_game, val->u.str);
+          } else if (val && val->type == PAN_JSON_ARRAY) {
+            for (size_t k = 0; k < val->u.arr.count; k++) {
+              const char* vs = pan_json_str(val->u.arr.items[k], NULL);
+              if (vs && vs[0]) strlist_add(extra_game, vs);
+            }
+          }
+        }
+      }
+    }
+  } else {
+    const char* legacy_mc = pan_json_str(pan_json_get(ljson, "minecraftArguments"), NULL);
+    if (legacy_mc && legacy_mc[0] && extra_game) {
+      extra_game->count = 0; /* Replace Mojang legacy args when Forge overrides minecraftArguments */
+      char* copy = xstrdup(legacy_mc);
+      char* ctx = NULL;
+      for (char* tok = strtok_s(copy, " ", &ctx); tok; tok = strtok_s(NULL, " ", &ctx)) {
+        if (tok[0]) strlist_add(extra_game, tok);
+      }
+      free(copy);
+    }
+  }
+  return 1;
+}
+
+typedef struct {
+  char version_id[128];
+  char* install_profile_json;
+  size_t install_profile_len;
+  uint8_t* universal_jar;
+  size_t universal_len;
+  int has_version_json;
+} PanInstallerInspect;
+
+static int inspect_forge_zip_cb(
+    const char* name,
+    const uint8_t* data,
+    size_t data_len,
+    size_t idx,
+    size_t total,
+    void* user) {
+  (void)idx;
+  (void)total;
+  PanInstallerInspect* ins = (PanInstallerInspect*)user;
+  if (strcmp(name, "version.json") == 0) {
+    ins->has_version_json = 1;
+    PanJsonValue* vj = pan_json_parse((const char*)data, data_len);
+    if (vj) {
+      const char* vid = pan_json_str(pan_json_get(vj, "id"), NULL);
+      if (vid && vid[0]) {
+        strncpy(ins->version_id, vid, sizeof(ins->version_id) - 1);
+      }
+      pan_json_free(vj);
+    }
+  } else if (strcmp(name, "install_profile.json") == 0 && !ins->install_profile_json) {
+    ins->install_profile_json = (char*)malloc(data_len + 1);
+    if (ins->install_profile_json) {
+      memcpy(ins->install_profile_json, data, data_len);
+      ins->install_profile_json[data_len] = '\0';
+      ins->install_profile_len = data_len;
+    }
+  } else if (!ins->universal_jar && strstr(name, "forge-") && strstr(name, "-universal.jar")) {
+    ins->universal_jar = (uint8_t*)malloc(data_len);
+    if (ins->universal_jar) {
+      memcpy(ins->universal_jar, data, data_len);
+      ins->universal_len = data_len;
+    }
+  }
+  return 1;
+}
+
+static int run_jar_install_client(const wchar_t* java_exe, const wchar_t* jar_path, const wchar_t* base_dir, char* err_out, size_t err_cap) {
+  wchar_t prof_path[MAX_PATH];
+  _snwprintf(prof_path, MAX_PATH, L"%ls\\launcher_profiles.json", base_dir);
+  prof_path[MAX_PATH - 1] = L'\0';
+  if (!file_exists_nonempty_w(prof_path)) {
+    const char* empty_prof = "{\"profiles\":{}}";
+    write_entire_file_w(prof_path, empty_prof, strlen(empty_prof));
+  }
+
+  wchar_t cmd[2048];
+  _snwprintf(cmd, 2048, L"\"%ls\" -jar \"%ls\" --installClient \"%ls\"", java_exe, jar_path, base_dir);
+  cmd[2047] = L'\0';
+
+  STARTUPINFOW si;
+  PROCESS_INFORMATION pi;
+  ZeroMemory(&si, sizeof(si));
+  ZeroMemory(&pi, sizeof(pi));
+  si.cb = sizeof(si);
+
+  if (!CreateProcessW(java_exe, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, base_dir, &si, &pi)) {
+    if (err_out) _snprintf(err_out, err_cap, "No se pudo ejecutar instalador Java (%lu).", GetLastError());
+    return 0;
+  }
+  DWORD wr = WaitForSingleObject(pi.hProcess, 240000);
+  DWORD exit_code = 1;
+  if (wr == WAIT_OBJECT_0) {
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+  } else {
+    TerminateProcess(pi.hProcess, 1);
+  }
+  CloseHandle(pi.hThread);
+  CloseHandle(pi.hProcess);
+  if (exit_code != 0) {
+    if (err_out) _snprintf(err_out, err_cap, "El instalador oficial devolvió error (código %lu).", (unsigned long)exit_code);
+    return 0;
+  }
+  return 1;
+}
+
+static void normalize_loader_name(const char* raw, char* out, size_t cap) {
+  char low[64] = {0};
+  size_t i = 0;
+  for (; raw && raw[i] && i + 1 < sizeof(low); i++) {
+    low[i] = (char)tolower((unsigned char)raw[i]);
+  }
+  low[i] = '\0';
+  if (strcmp(low, "fabric") == 0) strncpy(out, "Fabric", cap - 1);
+  else if (strcmp(low, "forge") == 0) strncpy(out, "Forge", cap - 1);
+  else if (strcmp(low, "neoforge") == 0) strncpy(out, "NeoForge", cap - 1);
+  else if (strcmp(low, "quilt") == 0) strncpy(out, "Quilt", cap - 1);
+  else strncpy(out, "Vanilla", cap - 1);
+  out[cap - 1] = '\0';
+}
+
 static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
   (void)param;
   HINTERNET hSession = NULL;
   PanJsonValue* req_json = NULL;
   PanJsonValue* mc_json = NULL;
+  PanJsonValue* loader_json = NULL;
   PanJsonValue* asset_idx_json = NULL;
   PanCpMap cp_map = {0};
   PanStrList extra_jvm = {0};
+  PanStrList loader_game = {0};
   PanStrList all_args = {0};
 
   char err_msg[1024] = {0};
   char mc_ver[64] = "1.21.4";
-  char loader[64] = "Fabric";
+  char loader[64] = "Vanilla";
+  char req_loader_ver[96] = {0};
+  char version_name[128] = "1.21.4";
   char inst_dir_utf8[MAX_PATH * 3] = {0};
 
   char* raw_req = NULL;
@@ -1355,8 +1847,12 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
 
   const char* v_str = pan_json_str(pan_json_get(req_json, "mcVersion"), "1.21.4");
   strncpy(mc_ver, v_str[0] ? v_str : "1.21.4", sizeof(mc_ver) - 1);
-  const char* l_str = pan_json_str(pan_json_get(req_json, "loader"), "Fabric");
-  strncpy(loader, l_str[0] ? l_str : "Fabric", sizeof(loader) - 1);
+  strncpy(version_name, mc_ver, sizeof(version_name) - 1);
+  normalize_loader_name(pan_json_str(pan_json_get(req_json, "loader"), "Vanilla"), loader, sizeof(loader));
+  const char* lv_str = pan_json_str(pan_json_get(req_json, "loaderVersion"), "");
+  strncpy(req_loader_ver, lv_str, sizeof(req_loader_ver) - 1);
+  const char* close_beh = pan_json_str(pan_json_get(req_json, "closeBehavior"), "quit");
+  int should_reopen = (_stricmp(close_beh, "quit") == 0);
 
   const char* raw_pid = pan_json_str(pan_json_get(req_json, "profileId"), "default");
   char safe_pid[128];
@@ -1371,9 +1867,22 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
     safe_pid[sp] = '\0';
   }
 
-  wchar_t w_mc_ver[64], w_safe_pid[128];
+  /* Isolate direct-mode instances per mcVersion + loader so natives/mods never collide */
+  char inst_folder[192];
+  if (strncmp(safe_pid, "inst-", 5) == 0) {
+    _snprintf(inst_folder, sizeof(inst_folder), "%s", safe_pid);
+  } else {
+    char low_loader[32];
+    size_t k = 0;
+    for (; loader[k] && k + 1 < sizeof(low_loader); k++) low_loader[k] = (char)tolower((unsigned char)loader[k]);
+    low_loader[k] = '\0';
+    _snprintf(inst_folder, sizeof(inst_folder), "%s-%s-%s", safe_pid, mc_ver, low_loader);
+  }
+  inst_folder[sizeof(inst_folder) - 1] = '\0';
+
+  wchar_t w_mc_ver[64], w_inst_folder[192];
   utf8_to_wide(mc_ver, w_mc_ver, 64);
-  utf8_to_wide(safe_pid, w_safe_pid, 128);
+  utf8_to_wide(inst_folder, w_inst_folder, 192);
 
   wchar_t versions_dir[MAX_PATH], libs_dir[MAX_PATH], assets_dir[MAX_PATH], runtime_dir[MAX_PATH];
   wchar_t instance_dir[MAX_PATH], natives_dir[MAX_PATH], mods_dir[MAX_PATH];
@@ -1381,7 +1890,7 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
   _snwprintf(libs_dir, MAX_PATH, L"%ls\\libraries", g_mc.base_dir);
   _snwprintf(assets_dir, MAX_PATH, L"%ls\\assets", g_mc.base_dir);
   _snwprintf(runtime_dir, MAX_PATH, L"%ls\\runtime", g_mc.base_dir);
-  _snwprintf(instance_dir, MAX_PATH, L"%ls\\instances\\%ls", g_mc.base_dir, w_safe_pid);
+  _snwprintf(instance_dir, MAX_PATH, L"%ls\\instances\\%ls", g_mc.base_dir, w_inst_folder);
   _snwprintf(natives_dir, MAX_PATH, L"%ls\\natives", instance_dir);
   _snwprintf(mods_dir, MAX_PATH, L"%ls\\mods", instance_dir);
 
@@ -1391,6 +1900,21 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
   ensure_dir_w(runtime_dir);
   ensure_dir_w(instance_dir);
   ensure_dir_w(natives_dir);
+  clean_natives_dir_w(natives_dir);
+  {
+    wchar_t subnat[MAX_PATH];
+    _snwprintf(subnat, MAX_PATH, L"%ls\\java", natives_dir); ensure_dir_w(subnat);
+    _snwprintf(subnat, MAX_PATH, L"%ls\\jna", natives_dir); ensure_dir_w(subnat);
+    _snwprintf(subnat, MAX_PATH, L"%ls\\lwjgl", natives_dir); ensure_dir_w(subnat);
+    _snwprintf(subnat, MAX_PATH, L"%ls\\netty", natives_dir); ensure_dir_w(subnat);
+    _snwprintf(subnat, MAX_PATH, L"%ls\\server-resource-packs", instance_dir); ensure_dir_w(subnat);
+    _snwprintf(subnat, MAX_PATH, L"%ls\\resourcepacks", instance_dir); ensure_dir_w(subnat);
+    _snwprintf(subnat, MAX_PATH, L"%ls\\downloads", instance_dir); ensure_dir_w(subnat);
+    _snwprintf(subnat, MAX_PATH, L"%ls\\saves", instance_dir); ensure_dir_w(subnat);
+    _snwprintf(subnat, MAX_PATH, L"%ls\\shaderpacks", instance_dir); ensure_dir_w(subnat);
+    _snwprintf(subnat, MAX_PATH, L"%ls\\logs", instance_dir); ensure_dir_w(subnat);
+    _snwprintf(subnat, MAX_PATH, L"%ls\\crash-reports", instance_dir); ensure_dir_w(subnat);
+  }
   ensure_dir_w(mods_dir);
   wide_to_utf8(instance_dir, inst_dir_utf8, sizeof(inst_dir_utf8));
 
@@ -1550,7 +2074,8 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
             strncpy(t->sha1, asha, sizeof(t->sha1) - 1);
             if (strstr(lname, ":natives-windows")) {
               t->is_native_jar = 1;
-            } else if (!nat_obj) {
+            }
+            {
               char ga[256];
               split_ga_key(lname, ga, sizeof(ga));
               cpmap_set(&cp_map, ga, t->dest);
@@ -1579,6 +2104,13 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
               _snwprintf(t->dest, MAX_PATH, L"%ls\\%ls", libs_dir, wrel);
               strncpy(t->sha1, nsha, sizeof(t->sha1) - 1);
               t->is_native_jar = 1;
+              {
+                char ga_base[220], ga_nat[256];
+                split_ga_key(lname, ga_base, sizeof(ga_base));
+                _snprintf(ga_nat, sizeof(ga_nat), "%s:%s", ga_base, resolved_key);
+                ga_nat[sizeof(ga_nat) - 1] = '\0';
+                cpmap_set(&cp_map, ga_nat, t->dest);
+              }
             }
           }
         }
@@ -1659,7 +2191,7 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
       }
 
       if (acnt > 0) {
-        set_pan_statusf("downloading", 62, "Descargando %zu assets en paralelo...", acnt);
+        set_pan_statusf("downloading", 62, "Descargando %llu assets en paralelo...", (unsigned long long)acnt);
         PanDlPool apool = {0};
         apool.tasks = atasks;
         apool.count = acnt;
@@ -1673,90 +2205,311 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
     }
   }
 
-  /* 6. Fabric Loader */
+  /* 6. Mod Loaders: Vanilla / Fabric / Quilt / Forge / NeoForge */
   char main_class[256];
   strncpy(main_class, pan_json_str(pan_json_get(mc_json, "mainClass"), "net.minecraft.client.main.Main"), sizeof(main_class) - 1);
   main_class[sizeof(main_class) - 1] = '\0';
 
-  int fabric_loaded = 0;
-  if (strcmp(loader, "Fabric") == 0 || strcmp(loader, "Quilt") == 0 || strcmp(loader, "NeoForge") == 0) {
+  int modded_ready = 0;
+  if (strcmp(loader, "Fabric") == 0) {
     set_pan_statusf("downloading", 80, "Instalando Fabric Loader para Minecraft %s...", mc_ver);
     char lurl[256];
     snprintf(lurl, sizeof(lurl), "https://meta.fabricmc.net/v2/versions/loader/%s", mc_ver);
     char tmp_err[256] = {0};
     PanJsonValue* loaders = http_get_json(hSession, lurl, tmp_err, sizeof(tmp_err));
+    const char* f_ver = NULL;
     if (loaders && loaders->type == PAN_JSON_ARRAY && loaders->u.arr.count > 0) {
-      const char* f_ver = NULL;
-      for (size_t i = 0; i < loaders->u.arr.count; i++) {
-        const PanJsonValue* lnode = pan_json_get(loaders->u.arr.items[i], "loader");
-        if (pan_json_bool(pan_json_get(lnode, "stable"), 0)) {
-          f_ver = pan_json_str(pan_json_get(lnode, "version"), NULL);
-          break;
+      if (req_loader_ver[0]) {
+        for (size_t i = 0; i < loaders->u.arr.count; i++) {
+          const char* v = pan_json_str(pan_json_get(pan_json_get(loaders->u.arr.items[i], "loader"), "version"), NULL);
+          if (v && strcmp(v, req_loader_ver) == 0) { f_ver = v; break; }
         }
       }
       if (!f_ver) {
-        f_ver = pan_json_str(pan_json_get(pan_json_get(loaders->u.arr.items[0], "loader"), "version"), NULL);
-      }
-      if (f_ver) {
-        char purl[320];
-        snprintf(purl, sizeof(purl), "https://meta.fabricmc.net/v2/versions/loader/%s/%s/profile/json", mc_ver, f_ver);
-        PanJsonValue* fjson = http_get_json(hSession, purl, tmp_err, sizeof(tmp_err));
-        if (fjson) {
-          const PanJsonValue* flibs = pan_json_get(fjson, "libraries");
-          if (flibs && flibs->type == PAN_JSON_ARRAY) {
-            for (size_t i = 0; i < flibs->u.arr.count; i++) {
-              const PanJsonValue* flib = flibs->u.arr.items[i];
-              const char* fname = pan_json_str(pan_json_get(flib, "name"), "");
-              const char* fbase = pan_json_str(pan_json_get(flib, "url"), "https://maven.fabricmc.net/");
-              char rel[512];
-              if (maven_coord_to_rel_path(fname, rel, sizeof(rel))) {
-                char furl[768];
-                size_t blen = strlen(fbase);
-                snprintf(furl, sizeof(furl), "%s%s%s", fbase, (blen > 0 && fbase[blen - 1] == '/') ? "" : "/", rel);
-                wchar_t wrel[MAX_PATH], fdest[MAX_PATH];
-                utf8_to_wide(rel, wrel, MAX_PATH);
-                for (int k = 0; wrel[k]; k++) if (wrel[k] == L'/') wrel[k] = L'\\';
-                _snwprintf(fdest, MAX_PATH, L"%ls\\%ls", libs_dir, wrel);
-                if (http_download_file(hSession, furl, fdest, NULL, tmp_err, sizeof(tmp_err))) {
-                  char ga[256];
-                  split_ga_key(fname, ga, sizeof(ga));
-                  cpmap_set(&cp_map, ga, fdest);
-                }
-              }
-            }
+        for (size_t i = 0; i < loaders->u.arr.count; i++) {
+          const PanJsonValue* lnode = pan_json_get(loaders->u.arr.items[i], "loader");
+          if (pan_json_bool(pan_json_get(lnode, "stable"), 0)) {
+            f_ver = pan_json_str(pan_json_get(lnode, "version"), NULL);
+            break;
           }
-          const char* fmc = pan_json_str(pan_json_get(fjson, "mainClass"), NULL);
-          if (fmc && fmc[0]) {
-            strncpy(main_class, fmc, sizeof(main_class) - 1);
-          }
-          const PanJsonValue* fjvm = pan_json_get(pan_json_get(fjson, "arguments"), "jvm");
-          if (fjvm && fjvm->type == PAN_JSON_ARRAY) {
-            for (size_t i = 0; i < fjvm->u.arr.count; i++) {
-              const char* ja = pan_json_str(fjvm->u.arr.items[i], NULL);
-              if (ja) {
-                while (*ja == ' ') ja++;
-                char* dup = xstrdup(ja);
-                size_t dlen = strlen(dup);
-                while (dlen > 0 && (dup[dlen - 1] == ' ' || dup[dlen - 1] == '\t')) dup[--dlen] = '\0';
-                if (dup[0]) strlist_add(&extra_jvm, dup);
-                free(dup);
-              }
-            }
-          }
-          fabric_loaded = 1;
-          pan_json_free(fjson);
         }
       }
-      pan_json_free(loaders);
+      if (!f_ver) f_ver = pan_json_str(pan_json_get(pan_json_get(loaders->u.arr.items[0], "loader"), "version"), NULL);
     }
-    if (!fabric_loaded) {
-      set_pan_statusf("downloading", 82, "Fabric no disponible para %s, iniciando modo Vanilla...", mc_ver);
+    if (!f_ver) {
+      if (loaders) pan_json_free(loaders);
+      snprintf(err_msg, sizeof(err_msg), "Fabric no está disponible para Minecraft %s. Cambia a Vanilla o Forge.", mc_ver);
+      goto on_error;
     }
+    char purl[320];
+    snprintf(purl, sizeof(purl), "https://meta.fabricmc.net/v2/versions/loader/%s/%s/profile/json", mc_ver, f_ver);
+    loader_json = http_get_json(hSession, purl, err_msg, sizeof(err_msg));
+    pan_json_free(loaders);
+    if (!loader_json) goto on_error;
+    if (!apply_loader_json_libs(hSession, loader_json, libs_dir, &cp_map, main_class, sizeof(main_class),
+                                version_name, sizeof(version_name), &extra_jvm, &loader_game, err_msg, sizeof(err_msg))) {
+      goto on_error;
+    }
+    modded_ready = 1;
+  } else if (strcmp(loader, "Quilt") == 0) {
+    set_pan_statusf("downloading", 80, "Instalando Quilt Loader para Minecraft %s...", mc_ver);
+    char qurl[256];
+    snprintf(qurl, sizeof(qurl), "https://meta.quiltmc.org/v3/versions/loader/%s", mc_ver);
+    char tmp_err[256] = {0};
+    PanJsonValue* loaders = http_get_json(hSession, qurl, tmp_err, sizeof(tmp_err));
+    const char* q_ver = NULL;
+    if (loaders && loaders->type == PAN_JSON_ARRAY && loaders->u.arr.count > 0) {
+      if (req_loader_ver[0]) {
+        for (size_t i = 0; i < loaders->u.arr.count; i++) {
+          const char* v = pan_json_str(pan_json_get(pan_json_get(loaders->u.arr.items[i], "loader"), "version"), NULL);
+          if (v && strcmp(v, req_loader_ver) == 0) { q_ver = v; break; }
+        }
+      }
+      if (!q_ver) {
+        for (size_t i = 0; i < loaders->u.arr.count; i++) {
+          const char* v = pan_json_str(pan_json_get(pan_json_get(loaders->u.arr.items[i], "loader"), "version"), NULL);
+          if (v && !strstr(v, "-beta") && !strstr(v, "-alpha")) { q_ver = v; break; }
+        }
+      }
+      if (!q_ver) q_ver = pan_json_str(pan_json_get(pan_json_get(loaders->u.arr.items[0], "loader"), "version"), NULL);
+    }
+    if (!q_ver) {
+      if (loaders) pan_json_free(loaders);
+      snprintf(err_msg, sizeof(err_msg), "Quilt no está disponible para Minecraft %s. Cambia a Vanilla o Fabric.", mc_ver);
+      goto on_error;
+    }
+    char purl[320];
+    snprintf(purl, sizeof(purl), "https://meta.quiltmc.org/v3/versions/loader/%s/%s/profile/json", mc_ver, q_ver);
+    loader_json = http_get_json(hSession, purl, err_msg, sizeof(err_msg));
+    pan_json_free(loaders);
+    if (!loader_json) goto on_error;
+    if (!apply_loader_json_libs(hSession, loader_json, libs_dir, &cp_map, main_class, sizeof(main_class),
+                                version_name, sizeof(version_name), &extra_jvm, &loader_game, err_msg, sizeof(err_msg))) {
+      goto on_error;
+    }
+    modded_ready = 1;
+  } else if (strcmp(loader, "Forge") == 0) {
+    set_pan_statusf("downloading", 80, "Resolviendo Forge oficial para Minecraft %s...", mc_ver);
+    char forge_full[128] = {0};
+    {
+      char prefix[80];
+      snprintf(prefix, sizeof(prefix), "%s-", mc_ver);
+      size_t xlen = 0;
+      char* xml = http_get_text(hSession, "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml",
+                                &xlen, err_msg, sizeof(err_msg));
+      if (!xml) goto on_error;
+      const char* p = xml;
+      char last_match[128] = {0};
+      while ((p = strstr(p, "<version>")) != NULL) {
+        p += 9;
+        const char* end = strstr(p, "</version>");
+        if (!end) break;
+        size_t vlen = (size_t)(end - p);
+        if (vlen > 0 && vlen < sizeof(last_match)) {
+          char cand[128];
+          memcpy(cand, p, vlen);
+          cand[vlen] = '\0';
+          if (strncmp(cand, prefix, strlen(prefix)) == 0) {
+            const char* sub = cand + strlen(prefix);
+            if (req_loader_ver[0] && strncmp(sub, req_loader_ver, strlen(req_loader_ver)) == 0 &&
+                (sub[strlen(req_loader_ver)] == '\0' || sub[strlen(req_loader_ver)] == '-')) {
+              strcpy(forge_full, cand);
+              break;
+            }
+            strcpy(last_match, cand);
+          }
+        }
+        p = end;
+      }
+      free(xml);
+      if (!forge_full[0] && last_match[0]) strcpy(forge_full, last_match);
+    }
+    if (!forge_full[0]) {
+      snprintf(err_msg, sizeof(err_msg), "Forge no publica versiones para Minecraft %s.", mc_ver);
+      goto on_error;
+    }
+
+    wchar_t w_ff[128], inst_jar[MAX_PATH];
+    utf8_to_wide(forge_full, w_ff, 128);
+    _snwprintf(inst_jar, MAX_PATH, L"%ls\\forge-%ls-installer.jar", runtime_dir, w_ff);
+    inst_jar[MAX_PATH - 1] = L'\0';
+    char iurl[512];
+    snprintf(iurl, sizeof(iurl),
+             "https://maven.minecraftforge.net/net/minecraftforge/forge/%s/forge-%s-installer.jar",
+             forge_full, forge_full);
+    set_pan_statusf("downloading", 82, "Descargando instalador Forge %s...", forge_full);
+    if (!http_download_file(hSession, iurl, inst_jar, NULL, err_msg, sizeof(err_msg))) goto on_error;
+
+    size_t zlen = 0;
+    uint8_t* zbuf = read_entire_file_w(inst_jar, &zlen);
+    if (!zbuf) {
+      snprintf(err_msg, sizeof(err_msg), "No se pudo leer el instalador Forge %s.", forge_full);
+      goto on_error;
+    }
+    PanInstallerInspect ins = {0};
+    pan_zip_extract_memory(zbuf, zlen, inspect_forge_zip_cb, &ins);
+    free(zbuf);
+
+    wchar_t ljson_path[MAX_PATH] = {0};
+    if (ins.has_version_json && ins.version_id[0]) {
+      wchar_t w_vid[128];
+      utf8_to_wide(ins.version_id, w_vid, 128);
+      _snwprintf(ljson_path, MAX_PATH, L"%ls\\%ls\\%ls.json", versions_dir, w_vid, w_vid);
+      if (!file_exists_nonempty_w(ljson_path)) {
+        wchar_t java_exe[MAX_PATH];
+        javaw_to_java_exe(javaw_path, java_exe, MAX_PATH);
+        set_pan_statusf("downloading", 84, "Instalando Forge %s en tu PC (puede tardar 15-40 s)...", forge_full);
+        if (!run_jar_install_client(java_exe, inst_jar, g_mc.base_dir, err_msg, sizeof(err_msg))) {
+          free(ins.install_profile_json);
+          free(ins.universal_jar);
+          goto on_error;
+        }
+      }
+    } else if (ins.install_profile_json) {
+      PanJsonValue* ip = pan_json_parse(ins.install_profile_json, ins.install_profile_len);
+      const PanJsonValue* vi = ip ? pan_json_get(ip, "versionInfo") : NULL;
+      const char* vi_id = vi ? pan_json_str(pan_json_get(vi, "id"), forge_full) : forge_full;
+      wchar_t w_vid[128];
+      utf8_to_wide(vi_id, w_vid, 128);
+      _snwprintf(ljson_path, MAX_PATH, L"%ls\\%ls\\%ls.json", versions_dir, w_vid, w_vid);
+      if (vi && !file_exists_nonempty_w(ljson_path)) {
+        const char* vi_start = strstr(ins.install_profile_json, "\"versionInfo\"");
+        const char* brace = vi_start ? strchr(vi_start, '{') : NULL;
+        if (brace) {
+          int depth = 0, in_s = 0, esc = 0;
+          const char* endp = brace;
+          for (; *endp; endp++) {
+            char ch = *endp;
+            if (esc) { esc = 0; continue; }
+            if (ch == '\\' && in_s) { esc = 1; continue; }
+            if (ch == '"') { in_s = !in_s; continue; }
+            if (!in_s) {
+              if (ch == '{') depth++;
+              else if (ch == '}') { depth--; if (depth == 0) { endp++; break; } }
+            }
+          }
+          if (depth == 0 && endp > brace) write_entire_file_w(ljson_path, brace, (size_t)(endp - brace));
+        }
+      }
+      if (ins.universal_jar && ins.universal_len > 0) {
+        wchar_t u_dest[MAX_PATH];
+        _snwprintf(u_dest, MAX_PATH, L"%ls\\net\\minecraftforge\\forge\\%ls\\forge-%ls.jar", libs_dir, w_ff, w_ff);
+        write_entire_file_w(u_dest, ins.universal_jar, ins.universal_len);
+      }
+      if (ip) pan_json_free(ip);
+    }
+    free(ins.install_profile_json);
+    free(ins.universal_jar);
+
+    if (!ljson_path[0] || !file_exists_nonempty_w(ljson_path)) {
+      snprintf(err_msg, sizeof(err_msg), "No se generó el perfil de Forge %s.", forge_full);
+      goto on_error;
+    }
+    size_t lj_len = 0;
+    uint8_t* lj_raw = read_entire_file_w(ljson_path, &lj_len);
+    loader_json = lj_raw ? pan_json_parse((const char*)lj_raw, lj_len) : NULL;
+    free(lj_raw);
+    if (!loader_json) {
+      snprintf(err_msg, sizeof(err_msg), "Manifiesto de Forge inválido.");
+      goto on_error;
+    }
+    if (!apply_loader_json_libs(hSession, loader_json, libs_dir, &cp_map, main_class, sizeof(main_class),
+                                version_name, sizeof(version_name), &extra_jvm, &loader_game, err_msg, sizeof(err_msg))) {
+      goto on_error;
+    }
+    modded_ready = 1;
+  } else if (strcmp(loader, "NeoForge") == 0) {
+    set_pan_statusf("downloading", 80, "Resolviendo NeoForge oficial para Minecraft %s...", mc_ver);
+    char nf_ver[96] = {0};
+    if (req_loader_ver[0]) {
+      strncpy(nf_ver, req_loader_ver, sizeof(nf_ver) - 1);
+    } else {
+      char k1[64], k2[64];
+      if (strncmp(mc_ver, "1.", 2) == 0) snprintf(k1, sizeof(k1), "%s.", mc_ver + 2);
+      else snprintf(k1, sizeof(k1), "%s.", mc_ver);
+      snprintf(k2, sizeof(k2), "%s.", mc_ver);
+      size_t xlen = 0;
+      char* xml = http_get_text(hSession, "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml",
+                                &xlen, err_msg, sizeof(err_msg));
+      if (!xml) goto on_error;
+      const char* p = xml;
+      char best_stable[96] = {0}, best_any[96] = {0};
+      while ((p = strstr(p, "<version>")) != NULL) {
+        p += 9;
+        const char* end = strstr(p, "</version>");
+        if (!end) break;
+        size_t vlen = (size_t)(end - p);
+        if (vlen > 0 && vlen < sizeof(nf_ver)) {
+          char cand[96];
+          memcpy(cand, p, vlen);
+          cand[vlen] = '\0';
+          if (strncmp(cand, k1, strlen(k1)) == 0 || strncmp(cand, k2, strlen(k2)) == 0) {
+            strcpy(best_any, cand);
+            if (!strstr(cand, "-beta") && !strstr(cand, "-alpha")) strcpy(best_stable, cand);
+          }
+        }
+        p = end;
+      }
+      free(xml);
+      if (best_stable[0]) strcpy(nf_ver, best_stable);
+      else if (best_any[0]) strcpy(nf_ver, best_any);
+    }
+    if (!nf_ver[0]) {
+      snprintf(err_msg, sizeof(err_msg), "NeoForge no publica versiones para Minecraft %s.", mc_ver);
+      goto on_error;
+    }
+
+    wchar_t w_nf[96], inst_jar[MAX_PATH];
+    utf8_to_wide(nf_ver, w_nf, 96);
+    _snwprintf(inst_jar, MAX_PATH, L"%ls\\neoforge-%ls-installer.jar", runtime_dir, w_nf);
+    char iurl[512];
+    snprintf(iurl, sizeof(iurl),
+             "https://maven.neoforged.net/releases/net/neoforged/neoforge/%s/neoforge-%s-installer.jar",
+             nf_ver, nf_ver);
+    set_pan_statusf("downloading", 82, "Descargando instalador NeoForge %s...", nf_ver);
+    if (!http_download_file(hSession, iurl, inst_jar, NULL, err_msg, sizeof(err_msg))) goto on_error;
+
+    size_t zlen = 0;
+    uint8_t* zbuf = read_entire_file_w(inst_jar, &zlen);
+    PanInstallerInspect ins = {0};
+    if (zbuf) {
+      pan_zip_extract_memory(zbuf, zlen, inspect_forge_zip_cb, &ins);
+      free(zbuf);
+    }
+    if (!ins.version_id[0]) snprintf(ins.version_id, sizeof(ins.version_id), "neoforge-%s", nf_ver);
+    wchar_t w_vid[128], ljson_path[MAX_PATH];
+    utf8_to_wide(ins.version_id, w_vid, 128);
+    _snwprintf(ljson_path, MAX_PATH, L"%ls\\%ls\\%ls.json", versions_dir, w_vid, w_vid);
+    if (!file_exists_nonempty_w(ljson_path)) {
+      wchar_t java_exe[MAX_PATH];
+      javaw_to_java_exe(javaw_path, java_exe, MAX_PATH);
+      set_pan_statusf("downloading", 84, "Instalando NeoForge %s en tu PC (puede tardar 15-40 s)...", nf_ver);
+      if (!run_jar_install_client(java_exe, inst_jar, g_mc.base_dir, err_msg, sizeof(err_msg))) {
+        free(ins.install_profile_json);
+        free(ins.universal_jar);
+        goto on_error;
+      }
+    }
+    free(ins.install_profile_json);
+    free(ins.universal_jar);
+
+    size_t lj_len = 0;
+    uint8_t* lj_raw = read_entire_file_w(ljson_path, &lj_len);
+    loader_json = lj_raw ? pan_json_parse((const char*)lj_raw, lj_len) : NULL;
+    free(lj_raw);
+    if (!loader_json) {
+      snprintf(err_msg, sizeof(err_msg), "No se encontró el manifiesto de NeoForge %s.", nf_ver);
+      goto on_error;
+    }
+    if (!apply_loader_json_libs(hSession, loader_json, libs_dir, &cp_map, main_class, sizeof(main_class),
+                                version_name, sizeof(version_name), &extra_jvm, &loader_game, err_msg, sizeof(err_msg))) {
+      goto on_error;
+    }
+    modded_ready = 1;
   }
 
-  /* 7. Modrinth FPS Mods & Dependencies */
-  if (fabric_loaded) {
-    set_pan_status("downloading", 85, "Descargando mods FPS y dependencias en Modrinth...", "", 0, NULL, NULL);
+  /* 7. Modrinth FPS Mods & Dependencies (never install Fabric mods into Vanilla or other loaders) */
+  {
     wchar_t managed_path[MAX_PATH];
     _snwprintf(managed_path, MAX_PATH, L"%ls\\pan-managed-mods.json", instance_dir);
     {
@@ -1780,111 +2533,127 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
       }
     }
 
-    int has_sodium = 0;
     const PanJsonValue* emods = pan_json_get(req_json, "enabledModIds");
-    if (emods && emods->type == PAN_JSON_ARRAY) {
-      for (size_t i = 0; i < emods->u.arr.count; i++) {
+    size_t mod_req_count = (emods && emods->type == PAN_JSON_ARRAY) ? emods->u.arr.count : 0;
+    if (modded_ready && mod_req_count > 0) {
+      set_pan_status("downloading", 88, "Descargando mods FPS y dependencias en Modrinth...", "", 0, NULL, NULL);
+      const char* modrinth_loader =
+          (strcmp(loader, "Forge") == 0) ? "forge"
+          : (strcmp(loader, "NeoForge") == 0) ? "neoforge"
+          : (strcmp(loader, "Quilt") == 0) ? "quilt"
+          : "fabric";
+      int has_sodium = 0;
+      for (size_t i = 0; i < mod_req_count; i++) {
         if (strcmp(pan_json_str(emods->u.arr.items[i], ""), "sodium") == 0) has_sodium = 1;
       }
-    }
 
-    PanStrList queue = {0};
-    PanStrList visited = {0};
-    PanStrList new_managed = {0};
-    strlist_add(&queue, "fabric-api");
-    if (emods && emods->type == PAN_JSON_ARRAY) {
-      for (size_t i = 0; i < emods->u.arr.count; i++) {
+      PanStrList queue = {0};
+      PanStrList visited = {0};
+      PanStrList new_managed = {0};
+      if (strcmp(loader, "Fabric") == 0) {
+        strlist_add(&queue, "fabric-api");
+      }
+      for (size_t i = 0; i < mod_req_count; i++) {
         const char* mid = pan_json_str(emods->u.arr.items[i], "");
         if (strcmp(mid, "vulkanmod") == 0 && has_sodium) continue;
         const char* slug = map_mod_slug(mid);
         if (slug) strlist_add(&queue, slug);
       }
-    }
 
-    for (size_t qidx = 0; qidx < queue.count; qidx++) {
-      const char* proj = queue.items[qidx];
-      if (strlist_contains(&visited, proj)) continue;
-      strlist_add(&visited, proj);
+      for (size_t qidx = 0; qidx < queue.count; qidx++) {
+        const char* proj = queue.items[qidx];
+        if (strlist_contains(&visited, proj)) continue;
+        strlist_add(&visited, proj);
 
-      char murl[512];
-      snprintf(murl, sizeof(murl),
-               "https://api.modrinth.com/v2/project/%s/version?game_versions=%%5B%%22%s%%22%%5D&loaders=%%5B%%22fabric%%22%%5D",
-               proj, mc_ver);
-      char tmp_err[256] = {0};
-      PanJsonValue* mvers = http_get_json(hSession, murl, tmp_err, sizeof(tmp_err));
-      if (mvers && mvers->type == PAN_JSON_ARRAY && mvers->u.arr.count > 0) {
-        const PanJsonValue* chosen = mvers->u.arr.items[0];
-        const PanJsonValue* files = pan_json_get(chosen, "files");
-        const PanJsonValue* mfile = NULL;
-        if (files && files->type == PAN_JSON_ARRAY && files->u.arr.count > 0) {
-          for (size_t f = 0; f < files->u.arr.count; f++) {
-            if (pan_json_bool(pan_json_get(files->u.arr.items[f], "primary"), 0)) {
-              mfile = files->u.arr.items[f];
+        char murl[512];
+        snprintf(murl, sizeof(murl),
+                 "https://api.modrinth.com/v2/project/%s/version?game_versions=%%5B%%22%s%%22%%5D&loaders=%%5B%%22%s%%22%%5D",
+                 proj, mc_ver, modrinth_loader);
+        char tmp_err[256] = {0};
+        PanJsonValue* mvers = http_get_json(hSession, murl, tmp_err, sizeof(tmp_err));
+        if (mvers && mvers->type == PAN_JSON_ARRAY && mvers->u.arr.count > 0) {
+          const PanJsonValue* chosen = mvers->u.arr.items[0];
+          for (size_t mv = 0; mv < mvers->u.arr.count; mv++) {
+            const char* vt = pan_json_str(pan_json_get(mvers->u.arr.items[mv], "version_type"), "");
+            if (strcmp(vt, "release") == 0) {
+              chosen = mvers->u.arr.items[mv];
               break;
             }
           }
-          if (!mfile) mfile = files->u.arr.items[0];
-        }
-        if (mfile) {
-          const char* furl = pan_json_str(pan_json_get(mfile, "url"), NULL);
-          const char* fname = pan_json_str(pan_json_get(mfile, "filename"), NULL);
-          const char* fsha1 = pan_json_str(pan_json_get(pan_json_get(mfile, "hashes"), "sha1"), "");
-          if (furl && fname) {
-            wchar_t wfn[256], mdest[MAX_PATH];
-            utf8_to_wide(fname, wfn, 256);
-            _snwprintf(mdest, MAX_PATH, L"%ls\\%ls", mods_dir, wfn);
-            if (http_download_file(hSession, furl, mdest, fsha1, tmp_err, sizeof(tmp_err))) {
-              strlist_add(&new_managed, fname);
+          const PanJsonValue* files = pan_json_get(chosen, "files");
+          const PanJsonValue* mfile = NULL;
+          if (files && files->type == PAN_JSON_ARRAY && files->u.arr.count > 0) {
+            for (size_t f = 0; f < files->u.arr.count; f++) {
+              if (pan_json_bool(pan_json_get(files->u.arr.items[f], "primary"), 0)) {
+                mfile = files->u.arr.items[f];
+                break;
+              }
+            }
+            if (!mfile) mfile = files->u.arr.items[0];
+          }
+          if (mfile) {
+            const char* furl = pan_json_str(pan_json_get(mfile, "url"), NULL);
+            const char* fname = pan_json_str(pan_json_get(mfile, "filename"), NULL);
+            const char* fsha1 = pan_json_str(pan_json_get(pan_json_get(mfile, "hashes"), "sha1"), "");
+            if (furl && fname) {
+              wchar_t wfn[256], mdest[MAX_PATH];
+              utf8_to_wide(fname, wfn, 256);
+              _snwprintf(mdest, MAX_PATH, L"%ls\\%ls", mods_dir, wfn);
+              if (http_download_file(hSession, furl, mdest, fsha1, tmp_err, sizeof(tmp_err))) {
+                strlist_add(&new_managed, fname);
+              }
+            }
+          }
+          const PanJsonValue* deps = pan_json_get(chosen, "dependencies");
+          if (deps && deps->type == PAN_JSON_ARRAY) {
+            for (size_t d = 0; d < deps->u.arr.count; d++) {
+              const PanJsonValue* dep = deps->u.arr.items[d];
+              const char* dtype = pan_json_str(pan_json_get(dep, "dependency_type"), "");
+              const char* dpid = pan_json_str(pan_json_get(dep, "project_id"), "");
+              if (strcmp(dtype, "required") == 0 && dpid[0] && !strlist_contains(&visited, dpid)) {
+                strlist_add(&queue, dpid);
+              }
             }
           }
         }
-        const PanJsonValue* deps = pan_json_get(chosen, "dependencies");
-        if (deps && deps->type == PAN_JSON_ARRAY) {
-          for (size_t d = 0; d < deps->u.arr.count; d++) {
-            const PanJsonValue* dep = deps->u.arr.items[d];
-            const char* dtype = pan_json_str(pan_json_get(dep, "dependency_type"), "");
-            const char* dpid = pan_json_str(pan_json_get(dep, "project_id"), "");
-            if (strcmp(dtype, "required") == 0 && dpid[0] && !strlist_contains(&visited, dpid)) {
-              strlist_add(&queue, dpid);
-            }
-          }
+        pan_json_free(mvers);
+      }
+
+      char* m_out = (char*)malloc(8192);
+      if (m_out) {
+        size_t p = 0;
+        m_out[p++] = '[';
+        for (size_t i = 0; i < new_managed.count && p + 300 < 8192; i++) {
+          char sj[512];
+          sanitize_json_str(new_managed.items[i], sj, sizeof(sj));
+          p += (size_t)_snprintf(m_out + p, 8192 - p, "%s\"%s\"", (i > 0 ? "," : ""), sj);
         }
+        m_out[p++] = ']';
+        m_out[p] = '\0';
+        write_entire_file_w(managed_path, m_out, p);
+        free(m_out);
       }
-      pan_json_free(mvers);
-    }
 
-    char* m_out = (char*)malloc(8192);
-    if (m_out) {
-      size_t p = 0;
-      m_out[p++] = '[';
-      for (size_t i = 0; i < new_managed.count && p + 300 < 8192; i++) {
-        char sj[512];
-        sanitize_json_str(new_managed.items[i], sj, sizeof(sj));
-        p += (size_t)_snprintf(m_out + p, 8192 - p, "%s\"%s\"", (i > 0 ? "," : ""), sj);
-      }
-      m_out[p++] = ']';
-      m_out[p] = '\0';
-      write_entire_file_w(managed_path, m_out, p);
-      free(m_out);
+      strlist_free(&queue);
+      strlist_free(&visited);
+      strlist_free(&new_managed);
+    } else {
+      DeleteFileW(managed_path);
     }
-
-    strlist_free(&queue);
-    strlist_free(&visited);
-    strlist_free(&new_managed);
   }
 
-  /* 8. Write options.txt */
+  /* 8. Merge managed options into options.txt (preserving user keybinds, resourcePacks & server settings) */
   {
     const char* opt_txt = pan_json_str(pan_json_get(req_json, "optionsTxt"), NULL);
     if (opt_txt && opt_txt[0]) {
       wchar_t opt_path[MAX_PATH];
       _snwprintf(opt_path, MAX_PATH, L"%ls\\options.txt", instance_dir);
-      write_entire_file_w(opt_path, opt_txt, strlen(opt_txt));
+      merge_options_txt_w(opt_path, opt_txt);
     }
   }
 
   /* 9. Build Classpath & JVM Arguments */
-  set_pan_statusf("launching", 93, "Configurando JVM y argumentos de Minecraft %s...", mc_ver);
+  set_pan_statusf("launching", 93, "Configurando JVM y argumentos de Minecraft %s (%s)...", mc_ver, loader);
   char* classpath = NULL;
   {
     char client_utf8[MAX_PATH * 3];
@@ -1904,13 +2673,21 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
       cp_len += ilen;
       classpath[cp_len++] = ';';
     }
-    size_t clen = strlen(client_utf8);
-    if (cp_len + clen + 4 >= cp_cap) {
-      cp_cap = cp_len + clen + 16;
-      classpath = (char*)realloc(classpath, cp_cap);
+    int skip_vanilla_client_cp =
+        (strstr(main_class, "BootstrapLauncher") != NULL) ||
+        (strstr(main_class, "ForgeBootstrap") != NULL) ||
+        (strstr(main_class, "fml.startup.") != NULL);
+    if (!skip_vanilla_client_cp) {
+      size_t clen = strlen(client_utf8);
+      if (cp_len + clen + 4 >= cp_cap) {
+        cp_cap = cp_len + clen + 16;
+        classpath = (char*)realloc(classpath, cp_cap);
+      }
+      memcpy(classpath + cp_len, client_utf8, clen);
+      cp_len += clen;
+    } else if (cp_len > 0 && classpath[cp_len - 1] == ';') {
+      cp_len--;
     }
-    memcpy(classpath + cp_len, client_utf8, clen);
-    cp_len += clen;
     classpath[cp_len] = '\0';
   }
 
@@ -1920,7 +2697,7 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
   if (GlobalMemoryStatusEx(&ms)) {
     total_ram_mb = (int)(ms.ullTotalPhys / (1024ULL * 1024ULL));
   }
-  int max_safe_mb = (total_ram_mb * 72) / 100;
+  int max_safe_mb = (total_ram_mb * 65) / 100;
   if (max_safe_mb < 1536) max_safe_mb = 1536;
   double req_gb = pan_json_num(pan_json_get(req_json, "ramGb"), 4.0);
   int req_mb = (int)(req_gb * 1024.0 + 0.5);
@@ -1935,12 +2712,10 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
   strlist_add(&all_args, xmx_arg);
 
   const char* gc_choice = pan_json_str(pan_json_get(req_json, "gc"), "ZGC");
-  if (strcmp(gc_choice, "ZGC") == 0 && java_major >= 21) {
+  int using_zgc = (strcmp(gc_choice, "ZGC") == 0 && java_major >= 21);
+  if (using_zgc) {
     strlist_add(&all_args, "-XX:+UseZGC");
-    if (java_major >= 24) {
-      strlist_add(&all_args, "-XX:+UnlockExperimentalVMOptions");
-      strlist_add(&all_args, "-XX:+UseCompactObjectHeaders");
-    } else {
+    if (java_major < 24) {
       strlist_add(&all_args, "-XX:+ZGenerational");
     }
   } else if (strcmp(gc_choice, "Shenandoah") == 0 && java_major >= 17) {
@@ -1954,11 +2729,10 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
     strlist_add(&all_args, "-XX:G1HeapRegionSize=32M");
   }
 
-  if (pan_json_bool(pan_json_get(req_json, "alwaysPreTouch"), 1)) {
+  if (pan_json_bool(pan_json_get(req_json, "alwaysPreTouch"), 0) && !using_zgc) {
     strlist_add(&all_args, "-XX:+AlwaysPreTouch");
   }
-  if (pan_json_bool(pan_json_get(req_json, "stringDeduplication"), 0) &&
-      (strcmp(gc_choice, "ZGC") != 0 || java_major < 21)) {
+  if (pan_json_bool(pan_json_get(req_json, "stringDeduplication"), 0) && !using_zgc) {
     strlist_add(&all_args, "-XX:+UseStringDeduplication");
   }
   int pthreads = (int)pan_json_num(pan_json_get(req_json, "parallelThreads"), 4);
@@ -1969,48 +2743,79 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
     snprintf(pt_arg, sizeof(pt_arg), "-XX:ConcGCThreads=%d", pthreads);
     strlist_add(&all_args, pt_arg);
   }
-  strlist_add(&all_args, "-XX:+DisableExplicitGC");
+  strlist_add(&all_args, "-XX:+ExplicitGCInvokesConcurrent");
   strlist_add(&all_args, "-XX:+PerfDisableSharedMem");
   strlist_add(&all_args, "-Djdk.nio.maxCachedBufferSize=262144");
 
   {
-    char buf[1024];
-    snprintf(buf, sizeof(buf), "-Djava.library.path=%s", natives_utf8);
+    char buf[2048];
+    snprintf(buf, sizeof(buf), "-Djava.library.path=%s;%s\\java", natives_utf8, natives_utf8);
     strlist_add(&all_args, buf);
-    snprintf(buf, sizeof(buf), "-Djna.tmpdir=%s", natives_utf8);
+    snprintf(buf, sizeof(buf), "-Dorg.lwjgl.librarypath=%s", natives_utf8);
     strlist_add(&all_args, buf);
-    snprintf(buf, sizeof(buf), "-Dorg.lwjgl.system.SharedLibraryExtractPath=%s", natives_utf8);
+    snprintf(buf, sizeof(buf), "-Djna.tmpdir=%s\\jna", natives_utf8);
     strlist_add(&all_args, buf);
-    snprintf(buf, sizeof(buf), "-Dio.netty.native.workdir=%s", natives_utf8);
+    snprintf(buf, sizeof(buf), "-Dorg.lwjgl.system.SharedLibraryExtractPath=%s\\lwjgl", natives_utf8);
+    strlist_add(&all_args, buf);
+    snprintf(buf, sizeof(buf), "-Dio.netty.native.workdir=%s\\netty", natives_utf8);
     strlist_add(&all_args, buf);
   }
   strlist_add(&all_args, "-Dminecraft.launcher.brand=Pan-launcher");
   strlist_add(&all_args, "-Dminecraft.launcher.version=2.3");
 
-  for (size_t i = 0; i < extra_jvm.count; i++) {
-    const char* ej = extra_jvm.items[i];
-    if (strcmp(ej, "-cp") != 0 && strcmp(ej, "${classpath}") != 0) {
-      strlist_add(&all_args, ej);
-    }
-  }
-
   const PanJsonValue* mc_jvm = pan_json_get(pan_json_get(mc_json, "arguments"), "jvm");
   if (mc_jvm && mc_jvm->type == PAN_JSON_ARRAY) {
     for (size_t i = 0; i < mc_jvm->u.arr.count; i++) {
-      const char* item = pan_json_str(mc_jvm->u.arr.items[i], NULL);
-      if (!item) continue;
-      if (strcmp(item, "-cp") == 0 || strcmp(item, "${classpath}") == 0) continue;
-      if (strncmp(item, "-Djava.library.path=", 20) == 0 ||
-          strncmp(item, "-Djna.tmpdir=", 13) == 0 ||
-          strncmp(item, "-Dorg.lwjgl.system.SharedLibraryExtractPath=", 44) == 0 ||
-          strncmp(item, "-Dio.netty.native.workdir=", 26) == 0 ||
-          strncmp(item, "-Dminecraft.launcher.", 21) == 0) continue;
-      char r1[1024], r2[1024], r3[1024];
-      str_replace_all(item, "${natives_directory}", natives_utf8, r1, sizeof(r1));
-      str_replace_all(r1, "${launcher_name}", "Pan-launcher", r2, sizeof(r2));
-      str_replace_all(r2, "${launcher_version}", "2.3", r3, sizeof(r3));
-      if (r3[0]) strlist_add(&all_args, r3);
+      const PanJsonValue* node = mc_jvm->u.arr.items[i];
+      const char* single = (node->type == PAN_JSON_STRING) ? node->u.str : NULL;
+      const PanJsonValue* vals = NULL;
+      if (!single && node->type == PAN_JSON_OBJECT && test_mojang_rules(pan_json_get(node, "rules"))) {
+        vals = pan_json_get(node, "value");
+        if (vals && vals->type == PAN_JSON_STRING) single = vals->u.str;
+      }
+      size_t vcount = (vals && vals->type == PAN_JSON_ARRAY) ? vals->u.arr.count : (single ? 1 : 0);
+      for (size_t v = 0; v < vcount; v++) {
+        const char* item = single ? single : pan_json_str(vals->u.arr.items[v], NULL);
+        if (!item || !item[0]) continue;
+        if (strcmp(item, "-cp") == 0 || strcmp(item, "${classpath}") == 0) continue;
+        if (strncmp(item, "-Djava.library.path=", 20) == 0 ||
+            strncmp(item, "-Djna.tmpdir=", 13) == 0 ||
+            strncmp(item, "-Dorg.lwjgl.system.SharedLibraryExtractPath=", 44) == 0 ||
+            strncmp(item, "-Dio.netty.native.workdir=", 26) == 0 ||
+            strncmp(item, "-Dminecraft.launcher.", 21) == 0) continue;
+        char* b1 = (char*)malloc(8192);
+        char* b2 = (char*)malloc(8192);
+        if (b1 && b2) {
+          str_replace_all(item, "${natives_directory}", natives_utf8, b1, 8192);
+          str_replace_all(b1, "${library_directory}", libs_utf8, b2, 8192);
+          str_replace_all(b2, "${classpath_separator}", ";", b1, 8192);
+          str_replace_all(b1, "${launcher_name}", "Pan-launcher", b2, 8192);
+          str_replace_all(b2, "${launcher_version}", "2.3", b1, 8192);
+          str_replace_all(b1, "${version_name}", version_name, b2, 8192);
+          if (b2[0]) strlist_add(&all_args, b2);
+        }
+        free(b1);
+        free(b2);
+      }
     }
+  }
+
+  for (size_t i = 0; i < extra_jvm.count; i++) {
+    const char* ej = extra_jvm.items[i];
+    if (strcmp(ej, "-cp") == 0 || strcmp(ej, "${classpath}") == 0) continue;
+    char* b1 = (char*)malloc(8192);
+    char* b2 = (char*)malloc(8192);
+    if (b1 && b2) {
+      str_replace_all(ej, "${natives_directory}", natives_utf8, b1, 8192);
+      str_replace_all(b1, "${library_directory}", libs_utf8, b2, 8192);
+      str_replace_all(b2, "${classpath_separator}", ";", b1, 8192);
+      str_replace_all(b1, "${launcher_name}", "Pan-launcher", b2, 8192);
+      str_replace_all(b2, "${launcher_version}", "2.3", b1, 8192);
+      str_replace_all(b1, "${version_name}", version_name, b2, 8192);
+      if (b2[0]) strlist_add(&all_args, b2);
+    }
+    free(b1);
+    free(b2);
   }
 
   const char* custom_args = pan_json_str(pan_json_get(req_json, "customArgs"), "");
@@ -2054,15 +2859,24 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
       const char* s = pan_json_str(mc_game->u.arr.items[i], NULL);
       if (s) strlist_add(&raw_tokens, s);
     }
+    for (size_t i = 0; i < loader_game.count; i++) {
+      strlist_add(&raw_tokens, loader_game.items[i]);
+    }
   } else {
-    const char* legacy = pan_json_str(pan_json_get(mc_json, "minecraftArguments"), NULL);
-    if (legacy) {
-      char* copy = xstrdup(legacy);
-      char* ctx = NULL;
-      for (char* tok = strtok_s(copy, " ", &ctx); tok; tok = strtok_s(NULL, " ", &ctx)) {
-        if (tok[0]) strlist_add(&raw_tokens, tok);
+    if (loader_game.count > 0) {
+      for (size_t i = 0; i < loader_game.count; i++) {
+        strlist_add(&raw_tokens, loader_game.items[i]);
       }
-      free(copy);
+    } else {
+      const char* legacy = pan_json_str(pan_json_get(mc_json, "minecraftArguments"), NULL);
+      if (legacy) {
+        char* copy = xstrdup(legacy);
+        char* ctx = NULL;
+        for (char* tok = strtok_s(copy, " ", &ctx); tok; tok = strtok_s(NULL, " ", &ctx)) {
+          if (tok[0]) strlist_add(&raw_tokens, tok);
+        }
+        free(copy);
+      }
     }
   }
 
@@ -2071,7 +2885,7 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
     strncpy(a, raw_tokens.items[i], sizeof(a) - 1);
     a[sizeof(a) - 1] = '\0';
     str_replace_all(a, "${auth_player_name}", player_name, b, sizeof(b));
-    str_replace_all(b, "${version_name}", mc_ver, a, sizeof(a));
+    str_replace_all(b, "${version_name}", version_name, a, sizeof(a));
     str_replace_all(a, "${game_directory}", inst_dir_utf8, b, sizeof(b));
     str_replace_all(b, "${assets_root}", assets_utf8, a, sizeof(a));
     str_replace_all(a, "${assets_index_name}", asset_id, b, sizeof(b));
@@ -2199,6 +3013,10 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
     goto on_error;
   }
 
+  EnterCriticalSection(&g_mc.cs);
+  g_mc.child_process = pi.hProcess;
+  LeaveCriticalSection(&g_mc.cs);
+
   set_pan_status("running", 100, "¡Minecraft Java ejecutándose en tu PC!", "", pi.dwProcessId, mc_ver, inst_dir_utf8);
   InterlockedExchange(&g_mc.launching, 0);
 
@@ -2207,13 +3025,26 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
   {
     DWORD exit_code = 0;
     GetExitCodeProcess(pi.hProcess, &exit_code);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
     EnterCriticalSection(&g_mc.cs);
     int still_same = (g_mc.pid == pi.dwProcessId);
+    if (g_mc.child_process == pi.hProcess) g_mc.child_process = NULL;
     LeaveCriticalSection(&g_mc.cs);
-    if (still_same && !g_mc.stop_requested) {
-      set_pan_status("finished", 100, "Sesión de Minecraft Java finalizada", "", 0, NULL, NULL);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    if (still_same && !g_mc.stop_requested && !g_mc.user_stopped) {
+      if (exit_code != 0) {
+        char crash_tail[1500] = {0};
+        find_crash_tail_w(instance_dir, err_log, out_log, crash_tail, sizeof(crash_tail));
+        char crash_msg[2048];
+        snprintf(crash_msg, sizeof(crash_msg), "Minecraft se cerró inesperadamente (código %lu). %s",
+                 (unsigned long)exit_code, crash_tail);
+        set_pan_status("error", 100, "Minecraft se cerró inesperadamente", crash_msg, 0, mc_ver, inst_dir_utf8);
+      } else {
+        set_pan_status("finished", 100, "Sesión de Minecraft Java finalizada", "", 0, NULL, NULL);
+      }
+      if (should_reopen && g_mc.reopen_ui_cb) {
+        g_mc.reopen_ui_cb();
+      }
     }
   }
   goto cleanup;
@@ -2226,9 +3057,11 @@ cleanup:
   if (hSession) WinHttpCloseHandle(hSession);
   pan_json_free(req_json);
   pan_json_free(mc_json);
+  pan_json_free(loader_json);
   pan_json_free(asset_idx_json);
   cpmap_free(&cp_map);
   strlist_free(&extra_jvm);
+  strlist_free(&loader_game);
   strlist_free(&all_args);
   return 0;
 }
@@ -2243,6 +3076,8 @@ int pan_mc_start_launch(const char* req_json, size_t req_len, char* err_out, siz
     /* Already preparing/downloading */
     return 1;
   }
+
+  InterlockedExchange(&g_mc.user_stopped, 0);
 
   char* copy = (char*)malloc(req_len + 1);
   if (!copy) {
@@ -2272,6 +3107,159 @@ int pan_mc_start_launch(const char* req_json, size_t req_len, char* err_out, siz
   return 1;
 }
 
+int pan_mc_stop(void) {
+  if (!g_mc.initialized) return 0;
+  InterlockedExchange(&g_mc.user_stopped, 1);
+  EnterCriticalSection(&g_mc.cs);
+  HANDLE hp = g_mc.child_process;
+  if (hp) TerminateProcess(hp, 0);
+  g_mc.child_process = NULL;
+  LeaveCriticalSection(&g_mc.cs);
+  set_pan_status("finished", 100, "Sesión detenida por el usuario", "", 0, NULL, NULL);
+  InterlockedExchange(&g_mc.launching, 0);
+  return 1;
+}
+
 void pan_mc_shutdown(void) {
   InterlockedExchange(&g_mc.stop_requested, 1);
 }
+
+int pan_mc_loader_catalog_json(const char* loader, const char* mc_ver, char* out_buf, size_t out_cap) {
+  if (!out_buf || out_cap < 128) return 0;
+  char low[32] = {0};
+  for (size_t i = 0; loader && loader[i] && i + 1 < sizeof(low); i++) {
+    low[i] = (char)tolower((unsigned char)loader[i]);
+  }
+  const char* gv = (mc_ver && mc_ver[0]) ? mc_ver : "1.21.4";
+  char esc_ld[64], esc_gv[96];
+  sanitize_json_str(low, esc_ld, sizeof(esc_ld));
+  sanitize_json_str(gv, esc_gv, sizeof(esc_gv));
+
+  HINTERNET hSession = create_winhttp_session();
+  if (!hSession) {
+    _snprintf(out_buf, out_cap, "{\"items\":[],\"loader\":\"%s\",\"gameVersion\":\"%s\",\"stale\":true}", esc_ld, esc_gv);
+    return 0;
+  }
+
+  size_t pos = (size_t)_snprintf(out_buf, out_cap, "{\"items\":[");
+  int count = 0;
+  int ok = 0;
+  char tmp_err[128] = {0};
+
+  if (strcmp(low, "fabric") == 0 || strcmp(low, "quilt") == 0) {
+    char url[320];
+    if (strcmp(low, "fabric") == 0) {
+      snprintf(url, sizeof(url), "https://meta.fabricmc.net/v2/versions/loader/%s", gv);
+    } else {
+      snprintf(url, sizeof(url), "https://meta.quiltmc.org/v3/versions/loader/%s", gv);
+    }
+    PanJsonValue* arr = http_get_json(hSession, url, tmp_err, sizeof(tmp_err));
+    if (arr && arr->type == PAN_JSON_ARRAY) {
+      ok = 1;
+      for (size_t i = 0; i < arr->u.arr.count && count < 60 && pos + 256 < out_cap; i++) {
+        const PanJsonValue* lnode = pan_json_get(arr->u.arr.items[i], "loader");
+        const char* ver = pan_json_str(pan_json_get(lnode, "version"), "");
+        if (!ver[0]) continue;
+        int stable = (strcmp(low, "fabric") == 0)
+            ? pan_json_bool(pan_json_get(lnode, "stable"), 0)
+            : (!strstr(ver, "-beta") && !strstr(ver, "-alpha"));
+        char ev[128];
+        sanitize_json_str(ver, ev, sizeof(ev));
+        pos += (size_t)_snprintf(
+            out_buf + pos, out_cap - pos,
+            "%s{\"id\":\"%s\",\"label\":\"%s\",\"stable\":%s}",
+            count > 0 ? "," : "", ev, ev, stable ? "true" : "false");
+        count++;
+      }
+    }
+    pan_json_free(arr);
+  } else if (strcmp(low, "forge") == 0) {
+    size_t xlen = 0;
+    char* xml = http_get_text(hSession, "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml",
+                              &xlen, tmp_err, sizeof(tmp_err));
+    if (xml) {
+      ok = 1;
+      char prefix[80];
+      snprintf(prefix, sizeof(prefix), "%s-", gv);
+      size_t plen = strlen(prefix);
+      char* matches[128];
+      int mcnt = 0;
+      const char* p = xml;
+      while ((p = strstr(p, "<version>")) != NULL) {
+        p += 9;
+        const char* end = strstr(p, "</version>");
+        if (!end) break;
+        size_t vlen = (size_t)(end - p);
+        if (vlen > plen && vlen < 120 && strncmp(p, prefix, plen) == 0) {
+          char sub[120];
+          memcpy(sub, p + plen, vlen - plen);
+          sub[vlen - plen] = '\0';
+          if (mcnt < 128) matches[mcnt++] = xstrdup(sub);
+        }
+        p = end;
+      }
+      for (int i = mcnt - 1; i >= 0 && count < 60 && pos + 256 < out_cap; i--) {
+        if (!matches[i]) continue;
+        char ev[128];
+        sanitize_json_str(matches[i], ev, sizeof(ev));
+        pos += (size_t)_snprintf(
+            out_buf + pos, out_cap - pos,
+            "%s{\"id\":\"%s\",\"label\":\"%s\",\"stable\":%s}",
+            count > 0 ? "," : "", ev, ev, (i == mcnt - 1) ? "true" : "false");
+        count++;
+      }
+      for (int i = 0; i < mcnt; i++) free(matches[i]);
+      free(xml);
+    }
+  } else if (strcmp(low, "neoforge") == 0) {
+    size_t xlen = 0;
+    char* xml = http_get_text(hSession, "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml",
+                              &xlen, tmp_err, sizeof(tmp_err));
+    if (xml) {
+      ok = 1;
+      char k1[64], k2[64];
+      if (strncmp(gv, "1.", 2) == 0) snprintf(k1, sizeof(k1), "%s.", gv + 2);
+      else snprintf(k1, sizeof(k1), "%s.", gv);
+      snprintf(k2, sizeof(k2), "%s.", gv);
+      char* matches[128];
+      int mcnt = 0;
+      const char* p = xml;
+      while ((p = strstr(p, "<version>")) != NULL) {
+        p += 9;
+        const char* end = strstr(p, "</version>");
+        if (!end) break;
+        size_t vlen = (size_t)(end - p);
+        if (vlen > 0 && vlen < 96) {
+          char cand[96];
+          memcpy(cand, p, vlen);
+          cand[vlen] = '\0';
+          if (strncmp(cand, k1, strlen(k1)) == 0 || strncmp(cand, k2, strlen(k2)) == 0) {
+            if (mcnt < 128) matches[mcnt++] = xstrdup(cand);
+          }
+        }
+        p = end;
+      }
+      for (int i = mcnt - 1; i >= 0 && count < 60 && pos + 256 < out_cap; i--) {
+        if (!matches[i]) continue;
+        int stable = !strstr(matches[i], "-beta") && !strstr(matches[i], "-alpha");
+        char ev[128];
+        sanitize_json_str(matches[i], ev, sizeof(ev));
+        pos += (size_t)_snprintf(
+            out_buf + pos, out_cap - pos,
+            "%s{\"id\":\"%s\",\"label\":\"%s\",\"stable\":%s}",
+            count > 0 ? "," : "", ev, ev, stable ? "true" : "false");
+        count++;
+      }
+      for (int i = 0; i < mcnt; i++) free(matches[i]);
+      free(xml);
+    }
+  }
+
+  WinHttpCloseHandle(hSession);
+  _snprintf(out_buf + pos, out_cap - pos,
+            "],\"loader\":\"%s\",\"gameVersion\":\"%s\",\"stale\":%s,\"source\":\"native-host\"}",
+            esc_ld, esc_gv, ok ? "false" : "true");
+  out_buf[out_cap - 1] = '\0';
+  return ok;
+}
+

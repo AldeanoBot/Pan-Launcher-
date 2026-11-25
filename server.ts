@@ -27,6 +27,7 @@ import {
   mapForgeLoaderItems,
   mapMojangManifest,
   mapNeoforgeLoaderItems,
+  mapQuiltLoaderItems,
 } from './src/utils/panBackend';
 import {
   detectModConflicts,
@@ -326,16 +327,17 @@ async function getPanVersions(force = false): Promise<PanVersionsCacheEntry> {
     }
     const fallbackItems: PanVersionItem[] = [
       { id: '26.3', order: 0, type: 'release', category: 'release', rawType: 'release', released: '2026-04-01T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: true, latestSnapshot: false },
-      { id: '1.21.11', order: 1, type: 'release', category: 'release', rawType: 'release', released: '2025-12-09T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
-      { id: '1.21.4', order: 2, type: 'release', category: 'release', rawType: 'release', released: '2024-12-03T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
-      { id: '1.21.3', order: 3, type: 'release', category: 'release', rawType: 'release', released: '2024-10-23T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
-      { id: '1.21.1', order: 4, type: 'release', category: 'release', rawType: 'release', released: '2024-08-08T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
-      { id: '1.20.4', order: 5, type: 'release', category: 'release', rawType: 'release', released: '2023-12-07T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
-      { id: '1.20.1', order: 6, type: 'release', category: 'release', rawType: 'release', released: '2023-06-12T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
-      { id: '1.19.4', order: 7, type: 'release', category: 'release', rawType: 'release', released: '2023-03-14T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
-      { id: '1.16.5', order: 8, type: 'release', category: 'release', rawType: 'release', released: '2021-01-15T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
-      { id: '1.12.2', order: 9, type: 'release', category: 'release', rawType: 'release', released: '2017-09-18T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
-      { id: '1.8.9', order: 10, type: 'release', category: 'release', rawType: 'release', released: '2015-12-09T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
+      { id: '26.2', order: 1, type: 'release', category: 'release', rawType: 'release', released: '2026-03-10T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
+      { id: '1.21.11', order: 2, type: 'release', category: 'release', rawType: 'release', released: '2025-12-09T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
+      { id: '1.21.4', order: 3, type: 'release', category: 'release', rawType: 'release', released: '2024-12-03T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
+      { id: '1.21.3', order: 4, type: 'release', category: 'release', rawType: 'release', released: '2024-10-23T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
+      { id: '1.21.1', order: 5, type: 'release', category: 'release', rawType: 'release', released: '2024-08-08T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
+      { id: '1.20.4', order: 6, type: 'release', category: 'release', rawType: 'release', released: '2023-12-07T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
+      { id: '1.20.1', order: 7, type: 'release', category: 'release', rawType: 'release', released: '2023-06-12T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
+      { id: '1.19.4', order: 8, type: 'release', category: 'release', rawType: 'release', released: '2023-03-14T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
+      { id: '1.16.5', order: 9, type: 'release', category: 'release', rawType: 'release', released: '2021-01-15T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
+      { id: '1.12.2', order: 10, type: 'release', category: 'release', rawType: 'release', released: '2017-09-18T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
+      { id: '1.8.9', order: 11, type: 'release', category: 'release', rawType: 'release', released: '2015-12-09T12:00:00+00:00', sha1: '', source: 'cache', latestRelease: false, latestSnapshot: false },
     ];
     return {
       items: fallbackItems,
@@ -348,7 +350,7 @@ async function getPanVersions(force = false): Promise<PanVersionsCacheEntry> {
 }
 
 async function getPanLoaderCatalog(
-  loader: 'fabric' | 'forge' | 'neoforge',
+  loader: 'fabric' | 'forge' | 'neoforge' | 'quilt',
   gameVersion: string,
   force = false
 ): Promise<{
@@ -388,6 +390,14 @@ async function getPanLoaderCatalog(
       );
       if (!resp.ok) throw new Error(`Error HTTP ${resp.status} en meta.fabricmc.net`);
       items = mapFabricLoaderItems(await resp.json(), gameVersion);
+    } else if (loader === 'quilt') {
+      const resp = await fetchWithTimeout(
+        `https://meta.quiltmc.org/v3/versions/loader/${encodeURIComponent(gameVersion)}`,
+        'application/json',
+        6500
+      );
+      if (!resp.ok) throw new Error(`Error HTTP ${resp.status} en meta.quiltmc.org`);
+      items = mapQuiltLoaderItems(await resp.json(), gameVersion);
     } else if (loader === 'forge') {
       const resp = await fetchWithTimeout(
         'https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml',
@@ -467,8 +477,8 @@ async function startServer() {
         });
         return;
       }
-      if (kind !== 'fabric' && kind !== 'forge' && kind !== 'neoforge') {
-        res.status(400).json({ error: 'Loader no válido (Vanilla, Fabric, Forge o NeoForge).' });
+      if (kind !== 'fabric' && kind !== 'forge' && kind !== 'neoforge' && kind !== 'quilt') {
+        res.status(400).json({ error: 'Loader no válido (Vanilla, Fabric, Forge, NeoForge o Quilt).' });
         return;
       }
       const catalog = await getPanLoaderCatalog(kind, gameVersion, force);
@@ -484,8 +494,8 @@ async function startServer() {
     const loader = String(req.params.loader || '').toLowerCase();
     const gameVersion = String(req.params.gameVersion || '');
     const force = req.query.force === 'true' || req.query.force === '1';
-    if (loader !== 'fabric' && loader !== 'forge' && loader !== 'neoforge') {
-      res.status(400).json({ error: 'Loader no válido (Fabric, Forge o NeoForge).' });
+    if (loader !== 'fabric' && loader !== 'forge' && loader !== 'neoforge' && loader !== 'quilt') {
+      res.status(400).json({ error: 'Loader no válido (Fabric, Forge, NeoForge o Quilt).' });
       return;
     }
     try {
@@ -618,6 +628,7 @@ async function startServer() {
       latest: { release: '26.3', snapshot: '26w14a' },
       versions: [
         { id: '26.3', type: 'release' },
+        { id: '26.2', type: 'release' },
         { id: '1.21.11', type: 'release' },
         { id: '1.21.4', type: 'release' },
         { id: '1.21.3', type: 'release' },
@@ -662,7 +673,16 @@ async function startServer() {
     mcVersion: string,
     loader: string
   ): Promise<ModrinthFileEntry[]> {
-    const loaderSlug = loader === 'NeoForge' ? 'neoforge' : loader === 'Quilt' ? 'quilt' : 'fabric';
+    const low = loader.toLowerCase();
+    if (low === 'vanilla') return [];
+    const loaderSlug =
+      low === 'neoforge'
+        ? 'neoforge'
+        : low === 'forge'
+          ? 'forge'
+          : low === 'quilt'
+            ? 'quilt'
+            : 'fabric';
     const targets = modIds.filter((id) => MODRINTH_SLUGS[id]);
     const results = await Promise.all(
       targets.map(async (id): Promise<ModrinthFileEntry | null> => {
@@ -680,6 +700,7 @@ async function startServer() {
           clearTimeout(timer);
           if (!resp.ok) return null;
           const versions = (await resp.json()) as Array<{
+            version_type?: string;
             files?: Array<{
               url: string;
               filename: string;
@@ -689,7 +710,8 @@ async function startServer() {
             }>;
           }>;
           if (!Array.isArray(versions) || versions.length === 0) return null;
-          const file = versions[0].files?.find((f) => f.primary) || versions[0].files?.[0];
+          const preferred = versions.find((v) => v.version_type === 'release') || versions[0];
+          const file = preferred.files?.find((f) => f.primary) || preferred.files?.[0];
           if (!file?.url || !file?.filename) return null;
           return {
             id,
@@ -726,9 +748,12 @@ async function startServer() {
 
     const resolved = await resolveModsFromModrinth(modIds, mcVersion, loader);
     const dependencies: Record<string, string> = { minecraft: mcVersion };
-    if (loader === 'NeoForge') {
+    const lowLoader = loader.toLowerCase();
+    if (lowLoader === 'neoforge') {
       dependencies['neoforge'] = '21.4.0-beta';
-    } else if (loader === 'Quilt') {
+    } else if (lowLoader === 'forge') {
+      dependencies['forge'] = '54.1.0';
+    } else if (lowLoader === 'quilt') {
       dependencies['quilt-loader'] = '0.28.0';
     } else {
       dependencies['fabric-loader'] = '0.16.10';
@@ -772,7 +797,7 @@ async function startServer() {
   });
 
   let cachedPcBundle: {
-    mtimeMs: number;
+    cacheKey: string;
     version: string;
     zipBase64: string;
     zipBuffer: Buffer;
@@ -792,8 +817,14 @@ async function startServer() {
     if (!fs.existsSync(distIndex)) {
       await viteBuild({ root: __dirname, logLevel: 'silent' });
     }
+    const hostExePath = path.resolve(__dirname, 'native/pan-host.exe');
+    if (!fs.existsSync(hostExePath)) {
+      throw new Error('Falta native/pan-host.exe para construir Pan-launcher.exe');
+    }
     const stat = fs.statSync(distIndex);
-    if (cachedPcBundle && cachedPcBundle.mtimeMs === stat.mtimeMs) {
+    const hostStat = fs.statSync(hostExePath);
+    const cacheKey = `${stat.mtimeMs}:${hostStat.mtimeMs}`;
+    if (cachedPcBundle && cachedPcBundle.cacheKey === cacheKey) {
       return {
         version: cachedPcBundle.version,
         zipBase64: cachedPcBundle.zipBase64,
@@ -844,10 +875,6 @@ async function startServer() {
     }
     winExeZip.file('version.txt', version);
 
-    const hostExePath = path.resolve(__dirname, 'native/pan-host.exe');
-    if (!fs.existsSync(hostExePath)) {
-      throw new Error('Falta native/pan-host.exe para construir Pan-launcher.exe');
-    }
     winExeZip.file('Pan-launcher.exe', fs.readFileSync(hostExePath));
 
     const [zipBuffer, winScriptBundleBuffer, winExeBundleBuffer] = await Promise.all([
@@ -858,7 +885,7 @@ async function startServer() {
 
     const zipBase64 = zipBuffer.toString('base64');
     cachedPcBundle = {
-      mtimeMs: stat.mtimeMs,
+      cacheKey,
       version,
       zipBase64,
       zipBuffer,

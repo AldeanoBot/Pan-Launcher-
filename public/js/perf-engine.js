@@ -106,35 +106,7 @@
       id: 'pvp',
       name: 'PvP Competitivo',
       badge: 'Recomendado PvP',
-      description: 'Máxima respuesta en BedWars/Duels: 8 chunks, Fullbright, sombras OFF, partículas mínimas, Raw Mouse Input y ZGC.',
-      video: Object.freeze({
-        renderDistance: 8,
-        simulationDistance: 6,
-        maxFps: 260,
-        graphicsMode: 'fast',
-        smoothLighting: false,
-        entityShadows: false,
-        particles: 'minimal',
-        clouds: 'off',
-        vsync: false,
-        biomeBlend: 1,
-        entityDistanceScaling: 80,
-        guiScale: 2,
-        fullbright: true,
-        rawMouseInput: true,
-        lowFireOverlay: true
-      }),
-      gc: 'ZGC',
-      alwaysPreTouch: true,
-      stringDeduplication: false,
-      disableTelemetry: true,
-      modIds: ['sodium', 'lithium', 'immediatelyfast', 'ferritecore', 'entityculling', 'modernfix', 'moreculling', 'krypton']
-    }),
-    potato: Object.freeze({
-      id: 'potato',
-      name: 'Ultra FPS (PC Modesto)',
-      badge: 'Máximo ahorro',
-      description: 'Exprime cada fotograma en equipos con gráficos integrados o 4 GB de RAM: 5 chunks, iluminación plana y pila FPS completa.',
+      description: 'Máxima respuesta en BedWars/Duels: 5 chunks, biome blend 0, entidades 60%, iluminación plana, Fullbright y ZGC.',
       video: Object.freeze({
         renderDistance: 5,
         simulationDistance: 5,
@@ -150,13 +122,47 @@
         guiScale: 2,
         fullbright: true,
         rawMouseInput: true,
-        lowFireOverlay: true
+        lowFireOverlay: true,
+        viewBobbing: true,
+        mipmapZero: false,
+        disableVisualEffects: false
+      }),
+      gc: 'ZGC',
+      alwaysPreTouch: false,
+      stringDeduplication: false,
+      disableTelemetry: true,
+      modIds: ['sodium', 'lithium', 'ferritecore', 'entityculling', 'modernfix', 'krypton']
+    }),
+    potato: Object.freeze({
+      id: 'potato',
+      name: 'Ultra FPS (Máximo Extremo)',
+      badge: 'Sin límite · 0% efectos',
+      description: 'Exprimido al 100%: 2 chunks, cero balanceo de mano, mipmap 0, sin blur/brillos/FOV, entidades al 50% y G1GC ligero.',
+      video: Object.freeze({
+        renderDistance: 2,
+        simulationDistance: 5,
+        maxFps: 260,
+        graphicsMode: 'fast',
+        smoothLighting: false,
+        entityShadows: false,
+        particles: 'minimal',
+        clouds: 'off',
+        vsync: false,
+        biomeBlend: 0,
+        entityDistanceScaling: 50,
+        guiScale: 2,
+        fullbright: true,
+        rawMouseInput: true,
+        lowFireOverlay: true,
+        viewBobbing: false,
+        mipmapZero: true,
+        disableVisualEffects: true
       }),
       gc: 'G1GC',
       alwaysPreTouch: true,
       stringDeduplication: true,
       disableTelemetry: true,
-      modIds: ['sodium', 'lithium', 'immediatelyfast', 'ferritecore', 'entityculling', 'modernfix', 'moreculling']
+      modIds: ['sodium', 'lithium', 'ferritecore', 'entityculling', 'modernfix', 'krypton']
     }),
     survival: Object.freeze({
       id: 'survival',
@@ -178,13 +184,16 @@
         guiScale: 2,
         fullbright: false,
         rawMouseInput: true,
-        lowFireOverlay: false
+        lowFireOverlay: false,
+        viewBobbing: true,
+        mipmapZero: false,
+        disableVisualEffects: false
       }),
       gc: 'ZGC',
-      alwaysPreTouch: true,
+      alwaysPreTouch: false,
       stringDeduplication: false,
       disableTelemetry: true,
-      modIds: ['sodium', 'lithium', 'immediatelyfast', 'ferritecore', 'entityculling', 'modernfix', 'krypton']
+      modIds: ['sodium', 'lithium', 'ferritecore', 'entityculling', 'modernfix', 'krypton']
     }),
     vanilla: Object.freeze({
       id: 'vanilla',
@@ -206,7 +215,10 @@
         guiScale: 2,
         fullbright: false,
         rawMouseInput: true,
-        lowFireOverlay: false
+        lowFireOverlay: false,
+        viewBobbing: true,
+        mipmapZero: false,
+        disableVisualEffects: false
       }),
       gc: 'G1GC',
       alwaysPreTouch: false,
@@ -247,7 +259,7 @@
       fpsBoostPercent: 28,
       ramSavedMb: 40,
       conflictsWith: ['optifine'],
-      description: 'Acelera renderizado de HUD, texto, inventario y entidades en GPU.',
+      description: 'Acelera renderizado de HUD y texto en GPU (opcional; desactivado por defecto para evitar cierres al reaparecer).',
       loaders: ['Fabric', 'NeoForge']
     },
     {
@@ -291,7 +303,7 @@
       fpsBoostPercent: 20,
       ramSavedMb: 25,
       conflictsWith: [],
-      description: 'Descarta caras ocultas en hojas, marcos e ítems para aliviar carga gráfica.',
+      description: 'Descarta caras ocultas en hojas, marcos e ítems (opcional; desactivado por defecto para evitar cierres con resource packs de servidor).',
       loaders: ['Fabric']
     },
     {
@@ -372,7 +384,10 @@
       guiScale: Number.isFinite(Number(perf.guiScale)) ? Number(perf.guiScale) : preset.video.guiScale,
       fullbright: typeof perf.fullbright === 'boolean' ? perf.fullbright : preset.video.fullbright,
       rawMouseInput: typeof perf.rawMouseInput === 'boolean' ? perf.rawMouseInput : preset.video.rawMouseInput,
-      lowFireOverlay: typeof perf.lowFireOverlay === 'boolean' ? perf.lowFireOverlay : preset.video.lowFireOverlay
+      lowFireOverlay: typeof perf.lowFireOverlay === 'boolean' ? perf.lowFireOverlay : preset.video.lowFireOverlay,
+      viewBobbing: typeof perf.viewBobbing === 'boolean' ? perf.viewBobbing : preset.video.viewBobbing !== false,
+      mipmapZero: typeof perf.mipmapZero === 'boolean' ? perf.mipmapZero : Boolean(preset.video.mipmapZero),
+      disableVisualEffects: typeof perf.disableVisualEffects === 'boolean' ? perf.disableVisualEffects : Boolean(preset.video.disableVisualEffects)
     };
     const jvm = {
       ramGb: Math.max(1, Math.round((ramMb / 1024) * 10) / 10),
@@ -437,17 +452,21 @@
   function estimatePerformance(mods, video, jvm, hardwareTier, pixelFactor) {
     const baseHardwareFps = HARDWARE_BASELINE_FPS[hardwareTier] || HARDWARE_BASELINE_FPS.mid;
     const resFactor = Number.isFinite(pixelFactor) ? pixelFactor : 1.0;
-    const chunkFactor = Math.max(0.45, Math.min(1.55, 12 / Math.max(2, video.renderDistance)));
+    const chunkFactor = Math.max(0.45, Math.min(2.1, 12 / Math.max(2, video.renderDistance)));
     const graphicsMultiplier = video.graphicsMode === 'fast' ? 1.14 : video.graphicsMode === 'fancy' ? 1.0 : 0.74;
     const smoothLightingMultiplier = video.smoothLighting ? 0.95 : 1.04;
     const shadowMultiplier = video.entityShadows ? 0.94 : 1.03;
     const particleMultiplier = video.particles === 'minimal' ? 1.06 : video.particles === 'decreased' ? 1.02 : 0.95;
     const cloudsMultiplier = video.clouds === 'off' ? 1.03 : video.clouds === 'fast' ? 1.0 : 0.94;
-    const biomeMultiplier = video.biomeBlend <= 1 ? 1.03 : Math.max(0.88, 1 - video.biomeBlend * 0.015);
-    const entityDistMultiplier = Math.max(0.84, Math.min(1.1, 100 / Math.max(50, video.entityDistanceScaling)));
+    const biomeMultiplier = video.biomeBlend <= 0 ? 1.05 : video.biomeBlend <= 1 ? 1.03 : Math.max(0.88, 1 - video.biomeBlend * 0.015);
+    const entityDistMultiplier = Math.max(0.84, Math.min(1.16, 100 / Math.max(50, video.entityDistanceScaling)));
+    const extraEffectsMultiplier = (video.mipmapZero ? 1.06 : 1.0)
+      * (video.disableVisualEffects ? 1.05 : 1.0)
+      * (video.viewBobbing === false ? 1.01 : 1.0);
 
     const rawVideoMultiplier = chunkFactor * graphicsMultiplier * smoothLightingMultiplier
-      * shadowMultiplier * particleMultiplier * cloudsMultiplier * biomeMultiplier * entityDistMultiplier;
+      * shadowMultiplier * particleMultiplier * cloudsMultiplier * biomeMultiplier * entityDistMultiplier
+      * extraEffectsMultiplier;
     const videoMultiplier = Math.pow(rawVideoMultiplier, 0.58) * resFactor;
 
     const vanillaFps = Math.max(
@@ -531,10 +550,7 @@
 
     if (jvm.gc === 'ZGC' && !useSafeG1) {
       args.push('-XX:+UseZGC');
-      if (javaMajor !== null && javaMajor >= 24) {
-        // Java 24/25 eliminó el ZGC no generacional y el flag -XX:+ZGenerational; ZGC ya es generacional por defecto
-        args.push('-XX:+UnlockExperimentalVMOptions', '-XX:+UseCompactObjectHeaders');
-      } else {
+      if (javaMajor === null || javaMajor < 24) {
         args.push('-XX:+ZGenerational');
       }
     } else if (jvm.gc === 'Shenandoah' && (javaMajor === null || javaMajor >= 17)) {
@@ -549,11 +565,11 @@
         '-XX:G1HeapRegionSize=32M'
       );
     }
-    if (jvm.alwaysPreTouch) args.push('-XX:+AlwaysPreTouch');
+    if (jvm.alwaysPreTouch && (jvm.gc !== 'ZGC' || useSafeG1)) args.push('-XX:+AlwaysPreTouch');
     if (jvm.stringDeduplication && (jvm.gc !== 'ZGC' || useSafeG1)) args.push('-XX:+UseStringDeduplication');
     args.push(
       `-XX:ConcGCThreads=${Math.max(1, Math.min(8, jvm.parallelThreads))}`,
-      '-XX:+DisableExplicitGC',
+      '-XX:+ExplicitGCInvokesConcurrent',
       '-XX:+PerfDisableSharedMem',
       '-Djdk.nio.maxCachedBufferSize=262144',
       '-Dfml.readTimeout=90'
@@ -571,7 +587,7 @@
     return [
       '# Pan Launcher - options.txt generado automaticamente',
       `renderDistance:${video.renderDistance}`,
-      `simulationDistance:${video.simulationDistance}`,
+      `simulationDistance:${Math.max(5, Number(video.simulationDistance) || 5)}`,
       `maxFps:${video.maxFps >= 260 ? 260 : video.maxFps}`,
       `graphicsMode:${graphicsNum}`,
       `ao:${video.smoothLighting ? 'true' : 'false'}`,
@@ -583,6 +599,19 @@
       `entityDistanceScaling:${(video.entityDistanceScaling / 100).toFixed(2)}`,
       `guiScale:${video.guiScale}`,
       `gamma:${video.fullbright ? '10.0' : '1.0'}`,
+      `bobView:${video.viewBobbing === false ? 'false' : 'true'}`,
+      `mipmapLevels:${video.mipmapZero ? 0 : 4}`,
+      ...(video.disableVisualEffects
+        ? [
+            'menuBackgroundBlurriness:0',
+            'glintSpeed:0.0',
+            'glintStrength:0.0',
+            'screenEffectScale:0.0',
+            'fovEffectScale:0.0',
+            'darknessEffectScale:0.0',
+            'damageTiltStrength:0.0'
+          ]
+        : []),
       `rawMouseInput:${video.rawMouseInput !== false ? 'true' : 'false'}`,
       `skipMultiplayerWarning:true`,
       `snooperEnabled:${network && network.disableTelemetry ? 'false' : 'true'}`
@@ -597,6 +626,12 @@
 
     if (enabledIds.has('optifine')) {
       warnings.push('OptiFine Legacy no se distribuye en Modrinth; no se descargará dentro del .mrpack automático.');
+    }
+    if (enabledIds.has('immediatelyfast')) {
+      warnings.push('ImmediatelyFast está activado: en algunas versiones de Sodium/1.21+ puede provocar cierres al reaparecer tras morir.');
+    }
+    if (enabledIds.has('moreculling')) {
+      warnings.push('MoreCulling está activado: puede provocar cierres en servidores que descargan paquetes de recursos propios.');
     }
     if (enabledIds.has('nvidium') && normalized.device && !normalized.device.isSoftwareRenderer && !normalized.device.isNvidia && !/no expuesta/i.test(normalized.device.gpuName)) {
       warnings.push(`Nvidium requiere GPU NVIDIA GTX 16xx/RTX (tu navegador reporta: ${normalized.device.gpuName}).`);

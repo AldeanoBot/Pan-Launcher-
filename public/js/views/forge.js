@@ -5,7 +5,8 @@
   Nexus.views = Nexus.views || {};
 
   Nexus.views.forge = function (state) {
-    const kind = state.loaders && state.loaders.loader === 'neoforge' ? 'neoforge' : 'forge';
+    const cur = state.loaders && state.loaders.loader;
+    const kind = cur === 'neoforge' || cur === 'quilt' ? cur : 'forge';
     return Nexus.views.renderLoaderPage(state, 'forge', kind);
   };
 })();

@@ -271,11 +271,9 @@ export default function App() {
     const optimalIds = new Set([
       'sodium',
       'lithium',
-      'immediatelyfast',
       'ferritecore',
       'entityculling',
       'modernfix',
-      'moreculling',
       'krypton',
       'c2me',
     ]);
