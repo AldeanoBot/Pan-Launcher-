@@ -1289,15 +1289,30 @@ input[type="range"] {
 }
 
 .launch-requirements {
+  list-style: none;
   display: grid;
-  gap: 6px;
+  gap: 8px;
   margin: 14px 0 0;
-  padding: 12px 14px 12px 30px;
+  padding: 12px 14px;
   border: 1px solid rgba(233, 185, 73, 0.28);
   border-radius: var(--radius-sm);
   background: rgba(233, 185, 73, 0.07);
   color: var(--warning);
-  font-size: 12px;
+  font-size: 12.5px;
+}
+
+.launch-req-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.launch-req-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .launch-actions {
@@ -3009,4 +3024,191 @@ body.low-end-mode .installation-card {
   }
 }
 
+/* ---------- Tutorial guiado y detalles simplificados ---------- */
 
+.topbar-tour-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.tour-replay-panel {
+  border-color: var(--accent-line);
+  background: linear-gradient(135deg, rgba(240, 178, 58, 0.08) 0%, var(--surface) 100%);
+}
+
+.simple-details {
+  padding: 14px 18px;
+}
+
+.simple-details > summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.simple-details > summary::after {
+  content: '▾';
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.simple-details[open] > summary {
+  color: var(--text);
+  margin-bottom: 14px;
+}
+
+.simple-details[open] > summary::after {
+  content: '▴';
+}
+
+.simple-details-body {
+  display: grid;
+  gap: 14px;
+}
+
+.pan-tour-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 950;
+  pointer-events: auto;
+}
+
+.pan-tour-backdrop {
+  position: fixed;
+  inset: 0;
+  background: transparent;
+}
+
+.pan-tour-spotlight {
+  position: fixed;
+  border-radius: 12px;
+  border: 2px solid #f7c754;
+  box-shadow:
+    0 0 0 9999px rgba(6, 4, 3, 0.78),
+    0 0 28px rgba(240, 178, 58, 0.42);
+  pointer-events: none;
+  transition: top 0.2s ease, left 0.2s ease, width 0.2s ease, height 0.2s ease;
+}
+
+.pan-tour-popover {
+  position: fixed;
+  width: min(360px, calc(100vw - 24px));
+  padding: 16px 18px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius);
+  background: #17110b;
+  box-shadow: 0 22px 56px rgba(0, 0, 0, 0.72);
+  display: grid;
+  gap: 10px;
+  transition: top 0.2s ease, left 0.2s ease;
+}
+
+.pan-tour-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pan-tour-popover h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: #fff8eb;
+}
+
+.pan-tour-desc {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.pan-tour-tip {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(240, 178, 58, 0.08);
+  border: 1px solid rgba(240, 178, 58, 0.22);
+  font-size: 12px;
+  line-height: 1.45;
+  color: #f8d88c;
+}
+
+.pan-tour-dots {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.pan-tour-dot {
+  width: 8px;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  transition: width 0.18s ease, background 0.18s ease;
+}
+
+.pan-tour-dot.done {
+  background: rgba(240, 178, 58, 0.45);
+}
+
+.pan-tour-dot.active {
+  width: 22px;
+  background: #f7c754;
+}
+
+.pan-tour-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.pan-tour-arrow {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: #17110b;
+  border-top: 1px solid var(--accent-line);
+  border-left: 1px solid var(--accent-line);
+  pointer-events: none;
+}
+
+.pan-tour-popover[data-placement="bottom"] .pan-tour-arrow {
+  top: -7px;
+  left: var(--tour-arrow-x, 32px);
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.pan-tour-popover[data-placement="top"] .pan-tour-arrow {
+  bottom: -7px;
+  left: var(--tour-arrow-x, 32px);
+  transform: translateX(-50%) rotate(225deg);
+}
+
+.pan-tour-popover[data-placement="right"] .pan-tour-arrow {
+  left: -7px;
+  top: var(--tour-arrow-y, 32px);
+  transform: translateY(-50%) rotate(-45deg);
+}
+
+.pan-tour-popover[data-placement="left"] .pan-tour-arrow {
+  right: -7px;
+  top: var(--tour-arrow-y, 32px);
+  transform: translateY(-50%) rotate(135deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pan-tour-spotlight,
+  .pan-tour-popover {
+    transition: none;
+  }
+}

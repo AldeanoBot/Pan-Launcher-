@@ -125,6 +125,9 @@
     // el template desactiva el botón; al terminar hay que volver a sincronizarlo
     // aunque el nodo original ya no esté en el documento.
     if (Nexus.router.current === 'newInstall') updateNewInstallSubmitState();
+    if (Nexus.tour && Nexus.tour.isActive() && typeof Nexus.tour.reposition === 'function') {
+      window.requestAnimationFrame(() => Nexus.tour.reposition());
+    }
   }
 
   async function applyConfig(patch, successMessage) {
@@ -1842,6 +1845,12 @@
         break;
       }
 
+      case 'start-tour':
+        if (Nexus.tour && typeof Nexus.tour.start === 'function') {
+          Nexus.tour.start(0);
+        }
+        break;
+
       case 'placeholder':
         toast('Esta función se implementará en una fase posterior.');
         break;
@@ -1855,6 +1864,15 @@
     document.querySelectorAll('.nav-item[data-view]').forEach((button) => {
       button.addEventListener('click', () => Nexus.router.navigate(button.getAttribute('data-view')));
     });
+
+    const tourBtn = document.getElementById('btn-start-tour');
+    if (tourBtn) {
+      tourBtn.addEventListener('click', () => {
+        if (Nexus.tour && typeof Nexus.tour.start === 'function') {
+          Nexus.tour.start(0);
+        }
+      });
+    }
 
     root.addEventListener('click', (event) => {
       const node = event.target.closest('[data-action]');
@@ -2243,6 +2261,14 @@
       refreshLaunchPreflight().catch(() => {});
       ensureDirectLoaderCatalog(false).catch(() => {});
       updateShell();
+      hydrateIcons(document.querySelector('.app-shell'));
+      if (Nexus.tour && typeof Nexus.tour.shouldAutoStart === 'function' && Nexus.tour.shouldAutoStart()) {
+        window.setTimeout(() => {
+          if (Nexus.tour && !Nexus.tour.isActive()) {
+            Nexus.tour.start(0);
+          }
+        }, 280);
+      }
       Nexus.api.listVersions().then(applyVersionCatalog).catch((error) => {
         const current = state();
         if (!current) return;

@@ -140,13 +140,13 @@
     const items = Array.isArray(dl.items) ? dl.items.slice(0, 40) : [];
 
     return `
-      <section class="panel loader-switcher-bar${compact ? ' is-compact' : ''}" aria-label="Selector de cargador de mods">
+      <section class="panel loader-switcher-bar${compact ? ' is-compact' : ''}" data-tour="home-loader" aria-label="Selector de cargador de mods">
         <div class="loader-switcher-main">
           <div class="loader-switcher-copy">
-            <strong>Cargador de mods</strong>
+            <strong>¿Juegas normal o con mods?</strong>
             <span>${profile.isInstallation
               ? `Perfil aislado "${escapeHtml(profile.installationName)}" (${escapeHtml(loaderLabelFor(profile.loader))})`
-              : `Versión ${escapeHtml(profile.gameVersion)} · ${escapeHtml(loaderLabelFor(profile.loader))}`}</span>
+              : `Vanilla = Minecraft normal · Fabric / Forge / NeoForge / Quilt = usar mods .jar`}</span>
           </div>
           <div class="loader-segmented" role="group" aria-label="Elegir cargador">
             ${LOADER_OPTIONS.map((item) => {
@@ -169,7 +169,7 @@
               <select id="home-loader-version" class="loader-version-select" ${dl.state === 'loading' ? 'disabled' : ''}>
                 ${dl.state === 'loading'
                   ? '<option value="">Cargando builds oficiales…</option>'
-                  : `<option value="">Automática (más estable)</option>${items.map((b) => `
+                  : `<option value="">Automática (recomendada)</option>${items.map((b) => `
                       <option value="${escapeHtml(b.id)}"${selectedBuild === b.id ? ' selected' : ''}>${escapeHtml(b.label || b.id)}${b.stable ? ' (Estable)' : ''}</option>`).join('')}`}
               </select>
               <button type="button" class="btn btn-xs" data-action="refresh-direct-loader-catalog" aria-label="Actualizar builds compatibles" title="Actualizar builds compatibles">
@@ -180,6 +180,39 @@
           </div>` : ''}
       </section>`;
   };
+
+  function requirementQuickActions(code) {
+    if (code === 'not-installed' || code === 'version') {
+      return `
+        <button type="button" class="btn btn-xs btn-outline-accent" data-action="navigate" data-view="versions">
+          Ir a Versiones <span data-icon="arrow"></span>
+        </button>`;
+    }
+    if (code === 'auth') {
+      return `
+        <div class="launch-req-btns">
+          <button type="button" class="btn btn-xs btn-primary" data-action="navigate" data-view="players">
+            Usar Modo Offline (Gratis)
+          </button>
+          <button type="button" class="btn btn-xs" data-action="navigate" data-view="accounts">
+            Entrar con Microsoft
+          </button>
+        </div>`;
+    }
+    if (code === 'ram') {
+      return `
+        <button type="button" class="btn btn-xs" data-action="navigate" data-view="ram">
+          Ajustar RAM <span data-icon="arrow"></span>
+        </button>`;
+    }
+    if (code === 'java') {
+      return `
+        <button type="button" class="btn btn-xs" data-action="navigate" data-view="java">
+          Configurar Java <span data-icon="arrow"></span>
+        </button>`;
+    }
+    return '';
+  }
 
   Nexus.views.launchPanel = function (state) {
     const launch = state.launch || {};
@@ -201,22 +234,20 @@
         ? escapeHtml(diagnostic.probableCause.message)
         : escapeHtml(status.error || 'Error desconocido al lanzar Minecraft.');
     } else if (phase === 'playing' && active) {
-      summary = `Minecraft ${escapeHtml(active.versionId)} en ejecución (PID ${escapeHtml(String(active.pid || '—'))}).`;
+      summary = `Minecraft ${escapeHtml(active.versionId)} está abierto.`;
     } else if (active) {
       summary = `${statusLabel(phase)} ${escapeHtml(versionId)}…`;
     } else if (reasons.length) {
-      summary = reasons[0].code === 'auth'
-        ? reasons[0].message
-        : 'Revisa los requisitos para activar el botón JUGAR superior.';
+      summary = 'Completa estos pasos rápidos para activar el botón JUGAR de arriba:';
     } else {
-      summary = 'Todo listo. Pulsa JUGAR arriba para iniciar Minecraft.';
+      summary = '¡Todo listo! Pulsa JUGAR arriba para abrir Minecraft.';
     }
 
     return `
       <section class="panel launch-panel" id="launch-panel-inner" data-phase="${escapeHtml(phase)}">
         <div class="panel-head">
           <div>
-            <h3>Sesión de juego</h3>
+            <h3>${reasons.length && phase === 'idle' ? '¿Qué falta para jugar?' : 'Estado de la sesión'}</h3>
             <p>${summary}</p>
           </div>
           <span class="badge badge-launch badge-${escapeHtml(phase)}">${escapeHtml(statusLabel(phase))}</span>
@@ -224,18 +255,21 @@
 
         <div class="launch-meta tabular">
           <span><strong>Versión:</strong> ${escapeHtml(versionId)}</span>
-          <span><strong>Cargador:</strong> ${escapeHtml(loaderDisplay)}</span>
-          <span><strong>Modo cuenta:</strong> ${active && active.mode ? escapeHtml(active.mode === 'offline' ? 'Offline' : 'Online') : escapeHtml(state.session && state.session.mode === 'offline' ? 'Offline' : 'Online')}</span>
-          ${perfEval ? `<span><strong>Perfil:</strong> ${escapeHtml(perfEval.presetName)} (${escapeHtml(perfEval.jvm.gc)})</span>` : ''}
-          <span><strong>Al iniciar juego:</strong> ${escapeHtml(closeMeta.short)}</span>
+          <span><strong>Modo:</strong> ${escapeHtml(loaderDisplay)}</span>
+          <span><strong>Cuenta:</strong> ${active && active.mode ? escapeHtml(active.mode === 'offline' ? 'Offline' : 'Online') : escapeHtml(state.session && state.session.mode === 'offline' ? 'Offline' : 'Online')}</span>
+          ${perfEval ? `<span><strong>Rendimiento:</strong> ${escapeHtml(perfEval.presetName)}</span>` : ''}
+          <span><strong>Al jugar:</strong> ${escapeHtml(closeMeta.short)}</span>
           ${active ? `<span><strong>Java:</strong> ${escapeHtml(String(active.javaMajor || '—'))}</span>
-          <span><strong>RAM:</strong> ${escapeHtml(formatRam(active.ramMb || state.config.launch.ramMb))}</span>
-          <span><strong>PID:</strong> ${escapeHtml(String(active.pid || '—'))}</span>` : ''}
+          <span><strong>RAM:</strong> ${escapeHtml(formatRam(active.ramMb || state.config.launch.ramMb))}</span>` : ''}
         </div>
 
         ${reasons.length && phase === 'idle' ? `
           <ul class="launch-requirements">
-            ${reasons.map((reason) => `<li data-reason="${escapeHtml(reason.code)}">${escapeHtml(reason.message)}</li>`).join('')}
+            ${reasons.map((reason) => `
+              <li class="launch-req-row" data-reason="${escapeHtml(reason.code)}">
+                <span>${escapeHtml(reason.message)}</span>
+                ${requirementQuickActions(reason.code)}
+              </li>`).join('')}
           </ul>` : ''}
 
         ${active || reasons.length || phase === 'error' ? `
@@ -243,7 +277,7 @@
             ${active ? `<button type="button" class="btn btn-danger btn-sm" data-action="stop-game">
               <span data-icon="stop"></span> Cerrar Minecraft
             </button>` : ''}
-            <button type="button" class="btn btn-sm" data-action="refresh-preflight">Comprobar requisitos</button>
+            <button type="button" class="btn btn-sm" data-action="refresh-preflight">Comprobar de nuevo</button>
           </div>` : ''}
 
         ${!active ? diagnosticPanel(status) : ''}
@@ -263,9 +297,9 @@
     const profile = sessionState.profile || auth.profile;
     const account = profile
       ? `${profile.name} · ${mode}`
-      : auth.canRestore ? `Sesión guardada · ${mode}` : `Sin sesión · ${mode}`;
+      : auth.canRestore ? `Sesión guardada · ${mode}` : `Sin jugador · ${mode}`;
     const installed = (state.installed || []).includes(version);
-    const versionLabel = installed ? 'Versión instalada' : 'Versión activa';
+    const versionLabel = installed ? 'Versión lista' : 'Versión elegida';
     const launch = state.launch || {};
     const preflight = launch.preflight || {};
     const logo = state.logo || null;
@@ -279,9 +313,9 @@
       <div class="page">
         <section class="hero">
           <div class="hero-copy">
-            <span class="pill"><span class="pill-dot"></span> LANZAMIENTO REAL · INSTALACIONES AISLADAS</span>
+            <span class="pill"><span class="pill-dot"></span> MINECRAFT JAVA · FÁCIL Y OPTIMIZADO</span>
             <h2>Tu mundo empieza aquí.</h2>
-            <p class="muted">Instala Minecraft Java desde servidores oficiales, exprime tus FPS con modo PvP o Ultra FPS y elige cuenta Microsoft o perfil local.</p>
+            <p class="muted">Elige tu versión, entra con tu nombre o cuenta Microsoft y juega con el máximo rendimiento desde el primer clic.</p>
             <div class="hero-actions">
               <button type="button" class="btn btn-primary btn-lg" data-action="play"
                       ${Nexus.views.canPlay(state) ? '' : 'disabled'}>
@@ -294,12 +328,12 @@
                       class="btn btn-sm hero-close-toggle${closeBehavior === 'quit' ? ' active' : ''}"
                       data-action="cycle-close-behavior"
                       aria-pressed="${closeBehavior === 'quit'}"
-                      title="Estilo SKLauncher: alterna si Pan Launcher se cierra, minimiza o permanece abierto al iniciar Minecraft">
+                      title="Alterna si Pan Launcher se cierra, minimiza o permanece abierto al iniciar Minecraft">
                 <span data-icon="${escapeHtml(closeMeta.icon)}"></span>
                 <span>${escapeHtml(closeMeta.label)}</span>
               </button>
             </div>
-            <p class="field-hint">${installed ? 'Versión instalada y verificada. ' : 'Instala una versión desde Versiones. '}${preflight.ready ? 'Sesión, Java y RAM comprobados.' : 'JUGAR se activa cuando se cumplen todos los requisitos.'}</p>
+            <p class="field-hint">${installed ? 'Versión instalada y lista. ' : 'Paso 1: instala una versión en Versiones. '}${preflight.ready ? 'Todo comprobado para jugar.' : 'Sigue los pasos de abajo para activar JUGAR.'}</p>
           </div>
           <div class="hero-art" aria-hidden="true">
             <div class="orb orb-one"></div>
@@ -309,7 +343,7 @@
           </div>
         </section>
 
-        <section class="stats-grid" aria-label="Estado del launcher">
+        <section class="stats-grid" aria-label="Resumen rápido">
           <article class="stat-card">
             <div class="stat-icon"><span data-icon="cube"></span></div>
             <div>
@@ -327,32 +361,32 @@
           <article class="stat-card">
             <div class="stat-icon"><span data-icon="ram"></span></div>
             <div>
-              <div class="stat-label">Memoria y GC</div>
-              <div class="stat-value tabular">${escapeHtml(ram)}${perfEval ? ` · ${escapeHtml(perfEval.jvm.gc)}` : ''}</div>
+              <div class="stat-label">Memoria RAM</div>
+              <div class="stat-value tabular">${escapeHtml(ram)}</div>
             </div>
           </article>
           <article class="stat-card">
             <div class="stat-icon"><span data-icon="user"></span></div>
             <div>
-              <div class="stat-label">Cuenta</div>
+              <div class="stat-label">Jugador</div>
               <div class="stat-value">${escapeHtml(account)}</div>
             </div>
           </article>
         </section>
 
-        ${Nexus.views.loaderSwitcherBar(state, false)}
-
         <div id="launch-panel">${Nexus.views.launchPanel(state)}</div>
 
+        ${Nexus.views.loaderSwitcherBar(state, false)}
+
         <section class="two-columns">
-          <div class="panel">
+          <div class="panel" data-tour="home-perf">
             <div class="panel-head">
               <div>
-                <h3>Modo de rendimiento rápido</h3>
-                <p>Elige si quieres modo PvP, Ultra FPS, Survival o Vanilla.</p>
+                <h3>¿Cómo quieres que vaya el juego?</h3>
+                <p>Elige un modo automático en 1 clic según tu PC o estilo de juego.</p>
               </div>
               <button type="button" class="btn btn-xs" data-action="navigate" data-view="performance">
-                Ajustar detalles <span data-icon="arrow"></span>
+                Personalizar <span data-icon="arrow"></span>
               </button>
             </div>
             <div class="preset-row">
@@ -367,27 +401,29 @@
             </div>
           </div>
 
-          <div class="panel">
+          <div class="panel" data-tour="home-shortcuts">
             <div class="panel-head">
               <div>
                 <h3>Accesos rápidos</h3>
-                <p>Configura versiones, jugadores y hardware en un clic.</p>
+                <p>Entra directo a lo que necesites configurar o ver.</p>
               </div>
             </div>
             <div class="preset-row">
-              <button type="button" class="btn btn-sm btn-outline-accent" data-action="navigate" data-view="settings">
-                <span data-icon="download"></span> Descargar .exe / Linux
+              <button type="button" class="btn btn-sm btn-outline-accent" data-action="navigate" data-view="mods">
+                <span data-icon="puzzle"></span> Añadir Mods (.jar)
               </button>
-              <button type="button" class="btn btn-sm" data-action="navigate" data-view="mods">Mods (.jar)</button>
-              <button type="button" class="btn btn-sm" data-action="navigate" data-view="ram">Memoria RAM</button>
-              <button type="button" class="btn btn-sm" data-action="navigate" data-view="java">Java</button>
-              <button type="button" class="btn btn-sm" data-action="navigate" data-view="players">Modo y jugadores</button>
+              <button type="button" class="btn btn-sm" data-action="navigate" data-view="players">Cuenta / Offline</button>
               <button type="button" class="btn btn-sm" data-action="navigate" data-view="skins">Skins 3D</button>
+              <button type="button" class="btn btn-sm" data-action="navigate" data-view="ram">Memoria RAM</button>
+              <button type="button" class="btn btn-sm" data-action="navigate" data-view="settings">Descargar .exe / Linux</button>
+              <button type="button" class="btn btn-sm btn-ghost" data-action="start-tour">
+                <span data-icon="help"></span> Ver tutorial
+              </button>
             </div>
           </div>
         </section>
 
-        ${note(`Modo ${mode}: ${profile ? escapeHtml(profile.name) : 'sin jugador activo'}. Las versiones se descargan de servidores oficiales de Mojang y se verifican por SHA1.`)}
+        ${note(`Modo ${mode}: ${profile ? escapeHtml(profile.name) : 'sin jugador activo'}. Tus servidores, idioma y opciones se conservan aunque cambies de versión o modo.`)}
       </div>`;
   };
 })();

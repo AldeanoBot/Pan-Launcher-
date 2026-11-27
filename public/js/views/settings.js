@@ -143,7 +143,19 @@
       <div class="page">
         ${settingsTabs('settings')}
         ${pageHead('AJUSTES', 'Configuración general y descargas',
-          'Descarga Pan Launcher para Windows o Linux y ajusta las preferencias locales de la aplicación.')}
+          'Descarga Pan Launcher para tu PC, repite la presentación guiada o ajusta tus preferencias.')}
+
+        <section class="panel tour-replay-panel">
+          <div class="panel-head" style="margin-bottom:0;">
+            <div>
+              <h3>Presentación guiada del launcher</h3>
+              <p>Vuelve a ver el tutorial interactivo que señala cada botón de Pan Launcher y explica cómo usar todo paso a paso.</p>
+            </div>
+            <button type="button" class="btn btn-primary btn-sm" data-action="start-tour">
+              <span data-icon="help"></span> Ver presentación
+            </button>
+          </div>
+        </section>
 
         ${installerDownloadPanel()}
 
@@ -194,7 +206,12 @@
           </div>
         </section>
 
-        ${hardwarePanel(state)}
+        <details class="panel simple-details">
+          <summary>Detalles técnicos del equipo y memoria recomendada (opcional)</summary>
+          <div class="simple-details-body">
+            ${hardwarePanel(state)}
+          </div>
+        </details>
 
         <section class="panel">
           <div class="panel-head">
