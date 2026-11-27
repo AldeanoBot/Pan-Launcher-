@@ -899,6 +899,204 @@ static void ServeStaticRoute(SOCKET clientSock, const char* relPath) {
   ServeFileW(clientSock, fullPath, mime, noStore, NULL);
 }
 
+static void SanitizeJarNameA(const char* in, char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  out[0] = '\0';
+  if (!in) in = "";
+  const char* lastSlash = strrchr(in, '/');
+  const char* lastBack = strrchr(in, '\\');
+  const char* base = lastSlash > lastBack ? lastSlash + 1 : (lastBack ? lastBack + 1 : in);
+  size_t j = 0;
+  for (size_t i = 0; base[i] && j + 6 < cap; i++) {
+    unsigned char c = (unsigned char)base[i];
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+        c == '.' || c == '_' || c == '-' || c == '+') {
+      if (j == 0 && c == '.') continue;
+      out[j++] = (char)c;
+    } else {
+      out[j++] = '_';
+    }
+  }
+  out[j] = '\0';
+  if (j == 0) {
+    strncpy(out, "custom-mod.jar", cap - 1);
+    out[cap - 1] = '\0';
+    return;
+  }
+  if (!StrEndsWithCI(out, ".jar") && j + 4 < cap) {
+    strcat(out, ".jar");
+  }
+}
+
+static void ExtractQueryParamDecoded(const char* query, const char* key, char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  out[0] = '\0';
+  if (!query || !key) return;
+  size_t klen = strlen(key);
+  const char* p = query;
+  while (*p) {
+    const char* amp = strchr(p, '&');
+    size_t segLen = amp ? (size_t)(amp - p) : strlen(p);
+    if (segLen > klen + 1 && _strnicmp(p, key, klen) == 0 && p[klen] == '=') {
+      const char* val = p + klen + 1;
+      size_t vlen = segLen - (klen + 1);
+      size_t j = 0;
+      for (size_t i = 0; i < vlen && j + 1 < cap; i++) {
+        if (val[i] == '%' && i + 2 < vlen && isxdigit((unsigned char)val[i + 1]) && isxdigit((unsigned char)val[i + 2])) {
+          char hx[3] = {val[i + 1], val[i + 2], '\0'};
+          out[j++] = (char)strtol(hx, NULL, 16);
+          i += 2;
+        } else if (val[i] == '+') {
+          out[j++] = ' ';
+        } else {
+          out[j++] = val[i];
+        }
+      }
+      out[j] = '\0';
+      return;
+    }
+    if (!amp) break;
+    p = amp + 1;
+  }
+}
+
+static void GetCustomModsDirW(wchar_t* outDir, size_t cap) {
+  _snwprintf(outDir, cap, L"%ls\\custom-mods", g_panDir);
+  outDir[cap - 1] = L'\0';
+  CreateDirectoryW(g_panDir, NULL);
+  CreateDirectoryW(outDir, NULL);
+}
+
+static void HandleCustomModsList(SOCKET clientSock) {
+  wchar_t modsDir[MAX_PATH];
+  GetCustomModsDirW(modsDir, MAX_PATH);
+
+  char dirUtf8[MAX_PATH * 3] = "";
+  WideCharToMultiByte(CP_UTF8, 0, modsDir, -1, dirUtf8, sizeof(dirUtf8), NULL, NULL);
+  char escDir[MAX_PATH * 3] = "";
+  EscapeJsonStr(dirUtf8, escDir, sizeof(escDir));
+
+  size_t outCap = 131072;
+  char* out = (char*)malloc(outCap);
+  if (!out) {
+    SendJsonResponse(clientSock, 500, "{\"ok\":false,\"error\":\"Sin memoria\"}");
+    return;
+  }
+  size_t pos = (size_t)_snprintf(out, outCap, "{\"ok\":true,\"dir\":\"%s\",\"files\":[", escDir);
+
+  wchar_t pattern[MAX_PATH];
+  _snwprintf(pattern, MAX_PATH, L"%ls\\*.jar", modsDir);
+  pattern[MAX_PATH - 1] = L'\0';
+
+  WIN32_FIND_DATAW fd;
+  HANDLE hFind = FindFirstFileW(pattern, &fd);
+  int count = 0;
+  if (hFind != INVALID_HANDLE_VALUE) {
+    do {
+      if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+      char fnUtf8[512] = "";
+      WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, fnUtf8, sizeof(fnUtf8), NULL, NULL);
+      char escFn[768] = "";
+      EscapeJsonStr(fnUtf8, escFn, sizeof(escFn));
+      ULONGLONG fsize = (((ULONGLONG)fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
+      if (pos + strlen(escFn) + 96 >= outCap) break;
+      pos += (size_t)_snprintf(out + pos, outCap - pos, "%s{\"filename\":\"%s\",\"size\":%llu}",
+                               count > 0 ? "," : "", escFn, (unsigned long long)fsize);
+      count++;
+    } while (FindNextFileW(hFind, &fd));
+    FindClose(hFind);
+  }
+  _snprintf(out + pos, outCap - pos, "]}");
+  SendJsonResponse(clientSock, 200, out);
+  free(out);
+}
+
+static void HandleCustomModsFile(SOCKET clientSock, const char* query) {
+  char rawName[256] = "";
+  char safeName[256] = "";
+  ExtractQueryParamDecoded(query, "filename", rawName, sizeof(rawName));
+  if (!rawName[0]) {
+    SendJsonResponse(clientSock, 400, "{\"ok\":false,\"error\":\"Nombre requerido\"}");
+    return;
+  }
+  SanitizeJarNameA(rawName, safeName, sizeof(safeName));
+  wchar_t modsDir[MAX_PATH], wName[256], fullPath[MAX_PATH];
+  GetCustomModsDirW(modsDir, MAX_PATH);
+  MultiByteToWideChar(CP_UTF8, 0, safeName, -1, wName, 256);
+  _snwprintf(fullPath, MAX_PATH, L"%ls\\%ls", modsDir, wName);
+  fullPath[MAX_PATH - 1] = L'\0';
+  ServeFileW(clientSock, fullPath, "application/java-archive", 1, NULL);
+}
+
+static void HandleCustomModsUpload(SOCKET clientSock, const char* query, const char* body, size_t bodyLen) {
+  if (!body || bodyLen == 0) {
+    SendJsonResponse(clientSock, 400, "{\"ok\":false,\"error\":\"Archivo vacío\"}");
+    return;
+  }
+  char rawName[256] = "";
+  char safeName[256] = "";
+  ExtractQueryParamDecoded(query, "filename", rawName, sizeof(rawName));
+  SanitizeJarNameA(rawName[0] ? rawName : "custom-mod.jar", safeName, sizeof(safeName));
+
+  wchar_t modsDir[MAX_PATH], wName[256], fullPath[MAX_PATH];
+  GetCustomModsDirW(modsDir, MAX_PATH);
+  MultiByteToWideChar(CP_UTF8, 0, safeName, -1, wName, 256);
+  _snwprintf(fullPath, MAX_PATH, L"%ls\\%ls", modsDir, wName);
+  fullPath[MAX_PATH - 1] = L'\0';
+
+  HANDLE hFile = CreateFileW(fullPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (hFile == INVALID_HANDLE_VALUE) {
+    SendJsonResponse(clientSock, 500, "{\"ok\":false,\"error\":\"No se pudo guardar el archivo .jar\"}");
+    return;
+  }
+  size_t written = 0;
+  int ok = 1;
+  while (written < bodyLen) {
+    DWORD chunk = (bodyLen - written) > 65536 ? 65536 : (DWORD)(bodyLen - written);
+    DWORD wr = 0;
+    if (!WriteFile(hFile, body + written, chunk, &wr, NULL) || wr == 0) {
+      ok = 0;
+      break;
+    }
+    written += wr;
+  }
+  CloseHandle(hFile);
+  if (!ok) {
+    DeleteFileW(fullPath);
+    SendJsonResponse(clientSock, 500, "{\"ok\":false,\"error\":\"Escritura incompleta del .jar\"}");
+    return;
+  }
+  char escFn[512] = "";
+  EscapeJsonStr(safeName, escFn, sizeof(escFn));
+  char resp[700];
+  _snprintf(resp, sizeof(resp), "{\"ok\":true,\"filename\":\"%s\",\"size\":%llu}", escFn, (unsigned long long)bodyLen);
+  SendJsonResponse(clientSock, 200, resp);
+}
+
+static void HandleCustomModsDelete(SOCKET clientSock, const char* body, size_t bodyLen) {
+  PanJsonValue* req = body && bodyLen > 0 ? pan_json_parse(body, bodyLen) : NULL;
+  const char* fn = req ? pan_json_str(pan_json_get(req, "filename"), "") : "";
+  if (fn && fn[0]) {
+    char safeName[256] = "";
+    SanitizeJarNameA(fn, safeName, sizeof(safeName));
+    wchar_t modsDir[MAX_PATH], wName[256], fullPath[MAX_PATH];
+    GetCustomModsDirW(modsDir, MAX_PATH);
+    MultiByteToWideChar(CP_UTF8, 0, safeName, -1, wName, 256);
+    _snwprintf(fullPath, MAX_PATH, L"%ls\\%ls", modsDir, wName);
+    fullPath[MAX_PATH - 1] = L'\0';
+    DeleteFileW(fullPath);
+  }
+  pan_json_free(req);
+  SendJsonResponse(clientSock, 200, "{\"ok\":true}");
+}
+
+static void HandleCustomModsOpenFolder(SOCKET clientSock) {
+  wchar_t modsDir[MAX_PATH];
+  GetCustomModsDirW(modsDir, MAX_PATH);
+  ShellExecuteW(NULL, L"open", modsDir, NULL, NULL, SW_SHOWNORMAL);
+  SendJsonResponse(clientSock, 200, "{\"ok\":true}");
+}
+
 /* =========================================================================
  * Multi-Threaded HTTP Request Worker
  * ========================================================================= */
@@ -952,9 +1150,14 @@ static DWORD WINAPI HttpClientThread(LPVOID param) {
       const char* val = p + 15;
       while (val < lineEnd && (*val == ' ' || *val == '\t')) val++;
       long cl = atol(val);
-      if (cl > 0 && cl <= 4 * 1024 * 1024) contentLength = (size_t)cl;
+      if (cl > 0 && cl <= 64L * 1024L * 1024L) contentLength = (size_t)cl;
     }
     p = lineEnd + 2;
+  }
+
+  if (contentLength > 65536) {
+    DWORD bigTimeout = 30000;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&bigTimeout, sizeof(bigTimeout));
   }
 
   /* Read remaining body bytes if any */
@@ -996,8 +1199,13 @@ static DWORD WINAPI HttpClientThread(LPVOID param) {
     }
   }
 
+  char queryStr[1024] = "";
   char* qmark = strchr(urlPath, '?');
-  if (qmark) *qmark = '\0';
+  if (qmark) {
+    strncpy(queryStr, qmark + 1, sizeof(queryStr) - 1);
+    queryStr[sizeof(queryStr) - 1] = '\0';
+    *qmark = '\0';
+  }
   const char* rel = urlPath[0] == '/' ? urlPath + 1 : urlPath;
 
   const char* bodyPtr = buf + hdrLen;
@@ -1029,6 +1237,16 @@ static DWORD WINAPI HttpClientThread(LPVOID param) {
     HandleLoaderCatalog(s, rel + 16);
   } else if (strcmp(rel, "api/mc/ping") == 0 && _stricmp(method, "POST") == 0) {
     HandleMcPing(s, bodyPtr, bodyLen);
+  } else if (strcmp(rel, "api/local/mods") == 0 && _stricmp(method, "GET") == 0) {
+    HandleCustomModsList(s);
+  } else if (strcmp(rel, "api/local/mods/file") == 0 && _stricmp(method, "GET") == 0) {
+    HandleCustomModsFile(s, queryStr);
+  } else if (strcmp(rel, "api/local/mods/upload") == 0 && _stricmp(method, "POST") == 0) {
+    HandleCustomModsUpload(s, queryStr, bodyPtr, bodyLen);
+  } else if (strcmp(rel, "api/local/mods/delete") == 0 && _stricmp(method, "POST") == 0) {
+    HandleCustomModsDelete(s, bodyPtr, bodyLen);
+  } else if (strcmp(rel, "api/local/mods/open-folder") == 0 && _stricmp(method, "POST") == 0) {
+    HandleCustomModsOpenFolder(s);
   } else if (strcmp(rel, "api/local/launch") == 0 && _stricmp(method, "POST") == 0) {
     if (bodyLen == 0) {
       SendJsonResponse(s, 400, "{\"ok\":false,\"error\":\"Falta configuraci\\u00f3n de lanzamiento\"}");

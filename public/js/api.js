@@ -136,6 +136,16 @@
     performance: Object.freeze({
       evaluate: (payload) => (bridge && bridge.performance ? bridge.performance.evaluate(payload) : unavailable()),
       exportMrpack: (payload) => (bridge && bridge.performance ? bridge.performance.exportMrpack(payload) : unavailable())
+    }),
+    mods: Object.freeze({
+      list: () => (bridge && bridge.mods ? bridge.mods.list() : Promise.resolve([])),
+      addFiles: (files) => (bridge && bridge.mods ? bridge.mods.addFiles(files) : unavailable()),
+      toggle: (id, enabled) => (bridge && bridge.mods ? bridge.mods.toggle(id, enabled) : unavailable()),
+      remove: (id) => (bridge && bridge.mods ? bridge.mods.remove(id) : unavailable()),
+      disableIncompatible: (mcVersion, loader) => (bridge && bridge.mods
+        ? bridge.mods.disableIncompatible(mcVersion, loader)
+        : unavailable()),
+      openFolder: () => (bridge && bridge.mods ? bridge.mods.openFolder() : unavailable())
     })
   });
 })();

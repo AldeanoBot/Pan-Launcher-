@@ -2926,6 +2926,71 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
     } else {
       DeleteFileW(managed_path);
     }
+
+    /* Apply enabled user custom mods from <base_dir>\custom-mods cleanly per instance */
+    wchar_t custom_managed_path[MAX_PATH];
+    _snwprintf(custom_managed_path, MAX_PATH, L"%ls\\pan-custom-mods.json", instance_dir);
+    {
+      size_t cmlen = 0;
+      uint8_t* cmraw = read_entire_file_w(custom_managed_path, &cmlen);
+      if (cmraw) {
+        PanJsonValue* prevc = pan_json_parse((const char*)cmraw, cmlen);
+        if (prevc && prevc->type == PAN_JSON_ARRAY) {
+          for (size_t i = 0; i < prevc->u.arr.count; i++) {
+            const char* old_cjar = pan_json_str(prevc->u.arr.items[i], NULL);
+            if (old_cjar && old_cjar[0]) {
+              wchar_t wold[MAX_PATH], wfull[MAX_PATH];
+              utf8_to_wide(old_cjar, wold, MAX_PATH);
+              _snwprintf(wfull, MAX_PATH, L"%ls\\%ls", mods_dir, wold);
+              DeleteFileW(wfull);
+            }
+          }
+        }
+        pan_json_free(prevc);
+        free(cmraw);
+      }
+    }
+
+    const PanJsonValue* cmods = pan_json_get(req_json, "customModFiles");
+    size_t cmod_count = (cmods && cmods->type == PAN_JSON_ARRAY) ? cmods->u.arr.count : 0;
+    if (modded_ready && cmod_count > 0) {
+      wchar_t custom_mods_store[MAX_PATH];
+      _snwprintf(custom_mods_store, MAX_PATH, L"%ls\\custom-mods", g_mc.base_dir);
+      PanStrList applied_custom = {0};
+      for (size_t i = 0; i < cmod_count; i++) {
+        const char* raw_fn = pan_json_str(cmods->u.arr.items[i], NULL);
+        if (!raw_fn || !raw_fn[0]) continue;
+        if (strstr(raw_fn, "..") || strchr(raw_fn, '/') || strchr(raw_fn, '\\')) continue;
+        wchar_t wfn[256], csrc[MAX_PATH], cdst[MAX_PATH];
+        utf8_to_wide(raw_fn, wfn, 256);
+        _snwprintf(csrc, MAX_PATH, L"%ls\\%ls", custom_mods_store, wfn);
+        _snwprintf(cdst, MAX_PATH, L"%ls\\%ls", mods_dir, wfn);
+        if (file_exists_nonempty_w(csrc) && CopyFileW(csrc, cdst, FALSE)) {
+          strlist_add(&applied_custom, raw_fn);
+        }
+      }
+      if (applied_custom.count > 0) {
+        char* cm_out = (char*)malloc(16384);
+        if (cm_out) {
+          size_t p = 0;
+          cm_out[p++] = '[';
+          for (size_t i = 0; i < applied_custom.count && p + 320 < 16384; i++) {
+            char sj[512];
+            sanitize_json_str(applied_custom.items[i], sj, sizeof(sj));
+            p += (size_t)_snprintf(cm_out + p, 16384 - p, "%s\"%s\"", (i > 0 ? "," : ""), sj);
+          }
+          cm_out[p++] = ']';
+          cm_out[p] = '\0';
+          write_entire_file_w(custom_managed_path, cm_out, p);
+          free(cm_out);
+        }
+      } else {
+        DeleteFileW(custom_managed_path);
+      }
+      strlist_free(&applied_custom);
+    } else {
+      DeleteFileW(custom_managed_path);
+    }
   }
 
   /* 8. Sync shared player profile (servers, language, controls, worlds, resourcepacks) then merge video presets */

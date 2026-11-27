@@ -755,6 +755,182 @@
     }));
   }
 
+  function resolveLaunchProfileForMods(current) {
+    const launchCfg = (current && current.config && current.config.launch) || {};
+    const list = (current && current.installations && current.installations.list) || [];
+    const active = list.find((item) => item.id === launchCfg.activeInstallationId) || null;
+    if (active) {
+      return {
+        gameVersion: active.gameVersion || active.versionId || '1.21.4',
+        loader: String(active.loader || 'vanilla').toLowerCase()
+      };
+    }
+    const rawVer = String(launchCfg.versionId || '1.21.4');
+    const match = rawVer.match(/^(fabric|forge|neoforge|quilt)-(.+)-([^-]+)$/i);
+    if (match) {
+      return { gameVersion: match[3], loader: match[1].toLowerCase() };
+    }
+    return {
+      gameVersion: rawVer,
+      loader: String(launchCfg.loader || 'vanilla').toLowerCase()
+    };
+  }
+
+  async function refreshCustomMods() {
+    const current = state();
+    if (!current || !Nexus.api.mods) return;
+    const items = await Nexus.api.mods.list();
+    current.customMods.items = Array.isArray(items) ? items : [];
+    if (Nexus.router.current === 'mods') refresh();
+  }
+
+  async function handleCustomModFiles(fileList) {
+    const current = state();
+    if (!current || !fileList || fileList.length === 0) return;
+    current.customMods.uploading = true;
+    if (Nexus.router.current === 'mods') refresh();
+    try {
+      const result = await Nexus.api.mods.addFiles(fileList);
+      current.customMods.items = Array.isArray(result.items) ? result.items : [];
+      if (result.added > 0) {
+        const profile = resolveLaunchProfileForMods(current);
+        const incompat = Nexus.modInspector
+          ? Nexus.modInspector.findIncompatibleEnabledMods(current.customMods.items, profile.gameVersion, profile.loader)
+          : [];
+        if (incompat.length > 0) {
+          toast(`${result.added} ${result.added === 1 ? 'mod añadido' : 'mods añadidos'}. Aviso: ${incompat.length} incompatible con ${profile.gameVersion}.`, 'error');
+        } else {
+          toast(`${result.added} ${result.added === 1 ? 'mod añadido y listo para jugar.' : 'mods añadidos y listos para jugar.'}`);
+        }
+      }
+      if (Array.isArray(result.errors) && result.errors.length > 0) {
+        toast(result.errors[0], 'error');
+      }
+    } catch (error) {
+      toast(publicErrorMessage(error), 'error');
+    } finally {
+      current.customMods.uploading = false;
+      refresh();
+    }
+  }
+
+  function closeModCompatModal() {
+    const existing = document.getElementById('mod-compat-modal');
+    if (existing) existing.remove();
+  }
+
+  async function executePlayLaunch(playNode) {
+    const current = state();
+    if (!current) return;
+    if (playNode) playNode.disabled = true;
+    current.launch.starting = true;
+    refreshLaunchPanel();
+    try {
+      const status = await Nexus.api.launch.start();
+      applyLaunchStatus(status);
+      toast(`Iniciando Minecraft ${status.active ? status.active.versionId : current.config.launch.versionId}…`);
+    } catch (error) {
+      current.launch.starting = false;
+      refreshLaunchPanel();
+      toast(error.message, 'error');
+    }
+  }
+
+  function showModCompatModal(options) {
+    closeModCompatModal();
+    const { profile, conflicts, playNode } = options;
+    const loaderLabel = DIRECT_LOADER_LABELS[profile.loader] || profile.loader;
+    const overlay = document.createElement('div');
+    overlay.id = 'mod-compat-modal';
+    overlay.className = 'pan-modal-backdrop';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-labelledby', 'mod-compat-title');
+
+    overlay.innerHTML = `
+      <div class="pan-modal">
+        <div class="pan-modal-head">
+          <div class="pan-modal-title-group">
+            <span class="badge badge-error">Compatibilidad</span>
+            <h3 id="mod-compat-title">Hay mods activos incompatibles antes de jugar</h3>
+          </div>
+          <button type="button" class="btn btn-xs" data-modal-action="cancel" aria-label="Cerrar aviso">✕</button>
+        </div>
+        <p class="pan-modal-subtitle">
+          Vas a iniciar <strong>Minecraft ${escapeHtml(profile.gameVersion)} (${escapeHtml(loaderLabel)})</strong>, pero estos mods tienen problemas de versión o cargador:
+        </p>
+        <ul class="pan-modal-list">
+          ${conflicts.map(({ mod, compat }) => `
+            <li>
+              <div>
+                <strong>${escapeHtml(mod.name || mod.filename)}</strong>
+                <code>${escapeHtml(mod.filename)}</code>
+              </div>
+              <p>${escapeHtml(compat.reason)}</p>
+            </li>`).join('')}
+        </ul>
+        <div class="pan-modal-actions">
+          <button type="button" class="btn btn-primary btn-sm" data-modal-action="disable-and-play">
+            Desactivar incompatibles y jugar
+          </button>
+          <button type="button" class="btn btn-sm" data-modal-action="play-anyway">
+            Jugar igualmente
+          </button>
+          <button type="button" class="btn btn-sm btn-ghost" data-modal-action="go-mods">
+            Revisar en Mods
+          </button>
+        </div>
+      </div>`;
+
+    const onKeyDown = (ev) => {
+      if (ev.key === 'Escape') {
+        document.removeEventListener('keydown', onKeyDown);
+        closeModCompatModal();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+
+    overlay.addEventListener('click', async (ev) => {
+      if (ev.target === overlay) {
+        document.removeEventListener('keydown', onKeyDown);
+        closeModCompatModal();
+        return;
+      }
+      const btn = ev.target.closest('[data-modal-action]');
+      if (!btn) return;
+      const modalAction = btn.getAttribute('data-modal-action');
+      document.removeEventListener('keydown', onKeyDown);
+
+      if (modalAction === 'cancel') {
+        closeModCompatModal();
+      } else if (modalAction === 'go-mods') {
+        closeModCompatModal();
+        Nexus.router.navigate('mods');
+      } else if (modalAction === 'play-anyway') {
+        closeModCompatModal();
+        await executePlayLaunch(playNode);
+      } else if (modalAction === 'disable-and-play') {
+        btn.disabled = true;
+        try {
+          const res = await Nexus.api.mods.disableIncompatible(profile.gameVersion, profile.loader);
+          const current = state();
+          if (current && Array.isArray(res.items)) {
+            current.customMods.items = res.items;
+          }
+          closeModCompatModal();
+          refresh();
+          toast(`${res.disabledCount || conflicts.length} mods incompatibles desactivados.`);
+          await executePlayLaunch(playNode);
+        } catch (error) {
+          closeModCompatModal();
+          toast(publicErrorMessage(error), 'error');
+        }
+      }
+    });
+
+    document.body.appendChild(overlay);
+  }
+
   async function handleAction(node) {
     const action = node.getAttribute('data-action');
     const current = state();
@@ -766,18 +942,16 @@
           toast(reason ? reason.message : 'No se cumplen los requisitos para jugar.', 'error');
           break;
         }
-        node.disabled = true;
-        current.launch.starting = true;
-        refreshLaunchPanel();
-        try {
-          const status = await Nexus.api.launch.start();
-          applyLaunchStatus(status);
-          toast(`Iniciando Minecraft ${status.active ? status.active.versionId : current.config.launch.versionId}…`);
-        } catch (error) {
-          current.launch.starting = false;
-          refreshLaunchPanel();
-          toast(error.message, 'error');
+        const profile = resolveLaunchProfileForMods(current);
+        const modList = (current.customMods && current.customMods.items) || [];
+        const conflicts = Nexus.modInspector
+          ? Nexus.modInspector.findIncompatibleEnabledMods(modList, profile.gameVersion, profile.loader)
+          : [];
+        if (conflicts.length > 0) {
+          showModCompatModal({ profile, conflicts, playNode: node });
+          break;
         }
+        await executePlayLaunch(node);
         break;
       }
 
@@ -1615,6 +1789,59 @@
         break;
       }
 
+      case 'custom-mods-pick': {
+        const input = document.getElementById('mods-file-input');
+        if (input) input.click();
+        break;
+      }
+
+      case 'custom-mods-open-folder': {
+        try {
+          const res = await Nexus.api.mods.openFolder();
+          if (res && res.ok === false && res.error) toast(res.error, 'error');
+          else toast('Carpeta de mods abierta.');
+        } catch (error) {
+          toast(publicErrorMessage(error), 'error');
+        }
+        break;
+      }
+
+      case 'custom-mods-refresh': {
+        try {
+          await refreshCustomMods();
+          toast('Lista de mods sincronizada.');
+        } catch (error) {
+          toast(publicErrorMessage(error), 'error');
+        }
+        break;
+      }
+
+      case 'custom-mods-disable-incompatible': {
+        const profile = resolveLaunchProfileForMods(current);
+        try {
+          const res = await Nexus.api.mods.disableIncompatible(profile.gameVersion, profile.loader);
+          current.customMods.items = Array.isArray(res.items) ? res.items : [];
+          refresh();
+          toast(`${res.disabledCount || 0} mods incompatibles desactivados.`);
+        } catch (error) {
+          toast(publicErrorMessage(error), 'error');
+        }
+        break;
+      }
+
+      case 'custom-mod-remove': {
+        const id = node.getAttribute('data-id');
+        if (!id) break;
+        try {
+          current.customMods.items = await Nexus.api.mods.remove(id);
+          refresh();
+          toast('Mod eliminado.');
+        } catch (error) {
+          toast(publicErrorMessage(error), 'error');
+        }
+        break;
+      }
+
       case 'placeholder':
         toast('Esta función se implementará en una fase posterior.');
         break;
@@ -1633,6 +1860,56 @@
       const node = event.target.closest('[data-action]');
       if (!node || !root.contains(node)) return;
       handleAction(node);
+    });
+
+    const hasDraggedFiles = (event) => {
+      const types = event.dataTransfer && event.dataTransfer.types;
+      return Boolean(types && Array.from(types).includes('Files'));
+    };
+
+    document.addEventListener('dragover', (event) => {
+      if (hasDraggedFiles(event)) event.preventDefault();
+    });
+
+    document.addEventListener('drop', (event) => {
+      if (hasDraggedFiles(event) && !event.target.closest('#mods-dropzone')) {
+        event.preventDefault();
+      }
+    });
+
+    root.addEventListener('dragenter', (event) => {
+      const zone = event.target.closest('#mods-dropzone');
+      if (zone && hasDraggedFiles(event)) {
+        event.preventDefault();
+        zone.classList.add('is-dragover');
+      }
+    });
+
+    root.addEventListener('dragover', (event) => {
+      const zone = event.target.closest('#mods-dropzone');
+      if (zone && hasDraggedFiles(event)) {
+        event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+        zone.classList.add('is-dragover');
+      }
+    });
+
+    root.addEventListener('dragleave', (event) => {
+      const zone = event.target.closest('#mods-dropzone');
+      if (zone && !zone.contains(event.relatedTarget)) {
+        zone.classList.remove('is-dragover');
+      }
+    });
+
+    root.addEventListener('drop', (event) => {
+      const zone = event.target.closest('#mods-dropzone');
+      if (!zone) return;
+      event.preventDefault();
+      zone.classList.remove('is-dragover');
+      const files = event.dataTransfer && event.dataTransfer.files;
+      if (files && files.length) {
+        handleCustomModFiles(files);
+      }
     });
 
     root.addEventListener('input', (event) => {
@@ -1752,6 +2029,20 @@
         applyConfig({ launch: { loaderVersion: target.value || null } });
       } else if (target.id === 'skin-import-model') {
         state().skins.importModel = target.value;
+      } else if (target.id === 'mods-file-input') {
+        const files = target.files ? Array.from(target.files) : [];
+        target.value = '';
+        if (files.length) handleCustomModFiles(files);
+      } else if (target.classList && target.classList.contains('custom-mod-toggle')) {
+        const id = target.getAttribute('data-id');
+        if (id && Nexus.api.mods) {
+          Nexus.api.mods.toggle(id, target.checked)
+            .then((items) => {
+              state().customMods.items = items;
+              refresh();
+            })
+            .catch((error) => toast(publicErrorMessage(error), 'error'));
+        }
       }
     });
   }
@@ -1787,7 +2078,7 @@
     try {
       const [
         info, config, auth, sessionStatus, installStatus, launchStatus, loaderStatus,
-        installationStatus, logoInfo
+        installationStatus, logoInfo, customModList
       ] = await Promise.all([
         Nexus.api.getInfo(),
         Nexus.api.getConfig(),
@@ -1797,7 +2088,8 @@
         Nexus.api.launch.status(),
         Nexus.api.loaders.status(),
         Nexus.api.installations.status(),
-        Nexus.api.logo.get()
+        Nexus.api.logo.get(),
+        Nexus.api.mods.list().catch(() => [])
       ]);
 
       const installationList = Array.isArray(installationStatus.installations)
@@ -1888,6 +2180,10 @@
           loaded: false,
           importModel: 'classic'
         },
+        customMods: {
+          items: Array.isArray(customModList) ? customModList : [],
+          uploading: false
+        },
         directLoader: {
           loader: null,
           gameVersion: null,
@@ -1924,6 +2220,7 @@
           ensureNewInstallCatalog(false).catch(() => {});
         }
         if (view === 'folders') refreshFolders().catch(() => {});
+        if (view === 'mods') refreshCustomMods().catch(() => {});
         if (view === 'installations') refreshInstallationStatus().catch(() => {});
         if (view === 'skins') ensureSkins(false).catch(() => {});
       };

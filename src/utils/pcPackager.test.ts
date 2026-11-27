@@ -75,6 +75,10 @@ test('buildWindowsSelfContainedBat embeds run.ps1, server.ps1, launch.ps1 and zi
   assert.match(serverPs1, /api\/local\/status/);
   assert.match(serverPs1, /api\/local\/hide-ui/);
   assert.match(serverPs1, /api\/local\/shutdown/);
+  assert.match(serverPs1, /api\/local\/mods/);
+  assert.match(serverPs1, /api\/local\/mods\/upload/);
+  assert.match(serverPs1, /api\/local\/mods\/delete/);
+  assert.match(serverPs1, /api\/local\/mods\/open-folder/);
   assert.match(serverPs1, /api\/mc\/ping/);
   assert.match(serverPs1, /api\/pc\/download-app/);
   assert.match(serverPs1, /Resolve-LoaderCatalog/);
@@ -112,6 +116,8 @@ test('buildWindowsSelfContainedBat embeds run.ps1, server.ps1, launch.ps1 and zi
   assert.match(launchPs1, /dependency_type -eq "required"/);
   assert.match(launchPs1, /TotalPhysicalMemory/);
   assert.match(launchPs1, /Find-CrashTailSafe/);
+  assert.match(launchPs1, /pan-custom-mods\.json/);
+  assert.match(launchPs1, /customModFiles/);
   assert.ok(!/"\$\{(auth_|natives_|classpath|launcher_|version_|game_|assets_)/.test(launchPs1), 'Must use single quotes for Mojang template tokens in PowerShell');
 
   const panAppCs = Buffer.from(b64Matches[2][1], 'base64').toString('utf8');
@@ -140,6 +146,12 @@ test('buildUnixSelfContainedSh embeds valid Python 3 Minecraft Java backend and 
   assert.match(serverPy, /api\/local\/hide-ui/);
   assert.match(serverPy, /api\/local\/status/);
   assert.match(serverPy, /api\/local\/shutdown/);
+  assert.match(serverPy, /api\/local\/mods/);
+  assert.match(serverPy, /api\/local\/mods\/upload/);
+  assert.match(serverPy, /api\/local\/mods\/delete/);
+  assert.match(serverPy, /api\/local\/mods\/open-folder/);
+  assert.match(serverPy, /pan-custom-mods\.json/);
+  assert.match(serverPy, /customModFiles/);
   assert.match(serverPy, /meta\.quiltmc\.org\/v3\/versions\/loader/);
   assert.match(serverPy, /maven\.minecraftforge\.net\/net\/minecraftforge\/forge/);
   assert.match(serverPy, /api\.adoptium\.net\/v3\/binary\/latest/);

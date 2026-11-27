@@ -7,13 +7,12 @@
   const VIEW_TITLES = Object.freeze({
     home: 'Inicio',
     versions: 'Versiones de Minecraft',
-    installations: 'Mis instalaciones',
+    mods: 'Mods personalizados (.jar)',
     newInstall: 'Nueva instalación',
-    folders: 'Carpetas de la instalación',
+    folders: 'Carpetas del perfil',
     fabric: 'Instalación de Fabric',
     forge: 'Forge y NeoForge',
     performance: 'Rendimiento y modo PvP',
-    mods: 'Mods de rendimiento',
     skins: 'Administrador de skins',
     ram: 'Configuración de RAM',
     java: 'Configuración de Java',
@@ -26,11 +25,10 @@
   const NAV_FOR_VIEW = Object.freeze({
     home: 'home',
     versions: 'versions',
-    installations: 'installations',
-    newInstall: 'installations',
-    folders: 'installations',
+    mods: 'mods',
+    newInstall: 'mods',
+    folders: 'mods',
     performance: 'performance',
-    mods: 'performance',
     players: 'players',
     skins: 'skins',
     settings: 'settings',
@@ -47,6 +45,7 @@
     const name = String(hash || '')
       .replace(/^#\/?/, '')
       .split('/')[0];
+    if (name === 'installations') return 'mods';
     return Object.prototype.hasOwnProperty.call(VIEW_TITLES, name) ? name : 'home';
   }
 

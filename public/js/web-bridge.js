@@ -110,6 +110,7 @@
       loadersInstalled: [],
       locals: [],
       skinsLocal: [],
+      customMods: [],
       skinOverrides: {},
       optionsPresets: {},
       lastInstallResult: null,
@@ -149,6 +150,7 @@
         loadersInstalled: Array.isArray(parsed && parsed.loadersInstalled) ? parsed.loadersInstalled : [],
         locals: Array.isArray(parsed && parsed.locals) ? parsed.locals : [],
         skinsLocal: Array.isArray(parsed && parsed.skinsLocal) ? parsed.skinsLocal : [],
+        customMods: Array.isArray(parsed && parsed.customMods) ? parsed.customMods : [],
         skinOverrides: (parsed && parsed.skinOverrides) || {},
         optionsPresets: (parsed && parsed.optionsPresets) || {}
       };
@@ -1480,6 +1482,11 @@
               : (Array.isArray(perfCfg.modIds) ? perfCfg.modIds : []));
 
         const closeBehavior = (store.config.general && store.config.general.closeBehavior) || 'quit';
+        const customModFiles = loader === 'Vanilla'
+          ? []
+          : (store.customMods || [])
+              .filter((m) => m && m.enabled && m.filename)
+              .map((m) => String(m.filename));
         const payload = {
           profileId: (activeInst && activeInst.id) || (perfEval && perfEval.presetId) || 'default',
           profileName: (activeInst && activeInst.name) || (perfEval && perfEval.presetName) || 'Pan Launcher',
@@ -1497,6 +1504,7 @@
           uuid: preflight.profile.id,
           accountType: preflight.mode === 'offline' ? 'offline' : 'msa',
           enabledModIds,
+          customModFiles,
           optionsTxt: perfEval ? perfEval.optionsTxt : ''
         };
 
@@ -1631,6 +1639,193 @@
           throw new Error(`No se pudo generar el modpack .mrpack (HTTP ${resp.status}).`);
         }
         return resp.blob();
+      }
+    }),
+    mods: Object.freeze({
+      list: async () => {
+        const health = await checkLocalHostHealth();
+        if (health.canLaunchJava) {
+          try {
+            const resp = await apiFetchJson('/api/local/mods');
+            const diskFiles = Array.isArray(resp.files) ? resp.files : [];
+            const diskMap = new Map(diskFiles.map((f) => [String(f.filename), Number(f.size) || 0]));
+            let changed = false;
+
+            const filtered = store.customMods.filter((m) => {
+              const keep = diskMap.has(String(m.filename));
+              if (!keep) changed = true;
+              return keep;
+            });
+            store.customMods = filtered;
+
+            const knownNames = new Set(store.customMods.map((m) => String(m.filename)));
+            const inspector = window.Nexus && window.Nexus.modInspector;
+            for (const f of diskFiles) {
+              const fname = String(f.filename || '');
+              if (!fname || knownNames.has(fname)) continue;
+              let meta = {
+                modId: fname.replace(/\.jar$/i, '').toLowerCase(),
+                name: fname.replace(/\.jar$/i, ''),
+                version: '—',
+                description: '',
+                loaders: [],
+                mcVersionSpec: null,
+                source: 'filename'
+              };
+              try {
+                const fileResp = await fetch(`/api/local/mods/file?filename=${encodeURIComponent(fname)}`, { cache: 'no-store' });
+                if (fileResp.ok && inspector) {
+                  const buf = await fileResp.arrayBuffer();
+                  meta = await inspector.inspectJarBuffer(buf, fname);
+                }
+              } catch {
+                if (inspector) meta = inspector.extractModMetadataFromEntries({ filename: fname });
+              }
+              store.customMods.unshift({
+                id: randomId('mod'),
+                filename: fname,
+                modId: meta.modId,
+                name: meta.name,
+                version: meta.version,
+                description: meta.description,
+                loaders: meta.loaders,
+                mcVersionSpec: meta.mcVersionSpec,
+                source: meta.source,
+                size: Number(f.size) || 0,
+                enabled: true,
+                addedAt: new Date().toISOString()
+              });
+              changed = true;
+            }
+            if (changed) saveStore();
+          } catch {
+            // Keep locally known metadata if host query failed transiently
+          }
+        }
+        return clone(store.customMods);
+      },
+      addFiles: async (fileList) => {
+        const files = Array.from(fileList || []);
+        const inspector = window.Nexus && window.Nexus.modInspector;
+        const health = await checkLocalHostHealth();
+        let added = 0;
+        let skipped = 0;
+        const errors = [];
+
+        for (const file of files) {
+          const rawName = String((file && file.name) || '');
+          if (!rawName.toLowerCase().endsWith('.jar')) {
+            skipped += 1;
+            errors.push(`"${rawName || 'archivo'}" no es un archivo .jar válido.`);
+            continue;
+          }
+          if (file.size > 64 * 1024 * 1024) {
+            skipped += 1;
+            errors.push(`"${rawName}" supera el límite de 64 MB.`);
+            continue;
+          }
+          const filename = inspector ? inspector.sanitizeJarFilename(rawName) : rawName.replace(/[^A-Za-z0-9._+-]/g, '_');
+          const buf = await file.arrayBuffer();
+          const meta = inspector
+            ? await inspector.inspectJarBuffer(buf, filename)
+            : {
+                modId: filename.replace(/\.jar$/i, '').toLowerCase(),
+                name: filename.replace(/\.jar$/i, ''),
+                version: '—',
+                description: '',
+                loaders: [],
+                mcVersionSpec: null,
+                source: 'filename'
+              };
+
+          if (health.canLaunchJava) {
+            const upResp = await fetch(`/api/local/mods/upload?filename=${encodeURIComponent(filename)}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/octet-stream' },
+              body: buf
+            });
+            const upJson = await upResp.json().catch(() => ({}));
+            if (!upResp.ok || !upJson.ok) {
+              throw new Error(upJson.error || `No se pudo guardar ${filename} en la carpeta local.`);
+            }
+          }
+
+          const existingIdx = store.customMods.findIndex((m) => m.filename === filename);
+          const entry = {
+            id: existingIdx >= 0 ? store.customMods[existingIdx].id : randomId('mod'),
+            filename,
+            modId: meta.modId,
+            name: meta.name,
+            version: meta.version,
+            description: meta.description,
+            loaders: meta.loaders,
+            mcVersionSpec: meta.mcVersionSpec,
+            source: meta.source,
+            size: file.size || buf.byteLength,
+            enabled: true,
+            addedAt: new Date().toISOString()
+          };
+          if (existingIdx >= 0) {
+            store.customMods.splice(existingIdx, 1);
+          }
+          store.customMods.unshift(entry);
+          added += 1;
+        }
+        saveStore();
+        return { added, skipped, errors, items: clone(store.customMods) };
+      },
+      toggle: async (id, enabled) => {
+        const target = store.customMods.find((m) => m.id === id);
+        if (!target) throw new Error('Mod no encontrado.');
+        target.enabled = Boolean(enabled);
+        saveStore();
+        return clone(store.customMods);
+      },
+      remove: async (id) => {
+        const idx = store.customMods.findIndex((m) => m.id === id);
+        if (idx < 0) return clone(store.customMods);
+        const [removed] = store.customMods.splice(idx, 1);
+        saveStore();
+        const health = await checkLocalHostHealth();
+        if (health.canLaunchJava && removed && removed.filename) {
+          try {
+            await fetch('/api/local/mods/delete', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ filename: removed.filename })
+            });
+          } catch {
+            // Ignore unlink error
+          }
+        }
+        return clone(store.customMods);
+      },
+      disableIncompatible: async (mcVersion, loader) => {
+        const inspector = window.Nexus && window.Nexus.modInspector;
+        let disabledCount = 0;
+        if (inspector) {
+          for (const mod of store.customMods) {
+            if (!mod || !mod.enabled) continue;
+            const res = inspector.evaluateCustomModCompatibility(mod, mcVersion, loader);
+            if (!res.compatible) {
+              mod.enabled = false;
+              disabledCount += 1;
+            }
+          }
+          if (disabledCount > 0) saveStore();
+        }
+        return { disabledCount, items: clone(store.customMods) };
+      },
+      openFolder: async () => {
+        const health = await checkLocalHostHealth();
+        if (!health.canLaunchJava) {
+          return {
+            ok: false,
+            error: 'En la vista previa web no existe carpeta local; arrastra tus .jar directamente a esta pantalla.'
+          };
+        }
+        const resp = await fetch('/api/local/mods/open-folder', { method: 'POST' });
+        return resp.json().catch(() => ({ ok: true }));
       }
     })
   });

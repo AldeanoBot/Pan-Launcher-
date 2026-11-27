@@ -91,8 +91,7 @@
     { view: 'java', label: 'Java', icon: 'java' },
     { view: 'accounts', label: 'Microsoft', icon: 'user' },
     { view: 'fabric', label: 'Fabric', icon: 'puzzle' },
-    { view: 'forge', label: 'Forge / NeoForge', icon: 'hammer' },
-    { view: 'mods', label: 'Mods FPS', icon: 'bolt' }
+    { view: 'forge', label: 'Forge / NeoForge', icon: 'hammer' }
   ]);
 
   function settingsTabs(activeView) {

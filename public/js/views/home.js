@@ -378,7 +378,7 @@
               <button type="button" class="btn btn-sm btn-outline-accent" data-action="navigate" data-view="settings">
                 <span data-icon="download"></span> Descargar .exe / Linux
               </button>
-              <button type="button" class="btn btn-sm" data-action="navigate" data-view="installations">Instalaciones</button>
+              <button type="button" class="btn btn-sm" data-action="navigate" data-view="mods">Mods (.jar)</button>
               <button type="button" class="btn btn-sm" data-action="navigate" data-view="ram">Memoria RAM</button>
               <button type="button" class="btn btn-sm" data-action="navigate" data-view="java">Java</button>
               <button type="button" class="btn btn-sm" data-action="navigate" data-view="players">Modo y jugadores</button>
