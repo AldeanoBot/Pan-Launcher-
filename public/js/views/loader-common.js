@@ -6,6 +6,14 @@
 
   Nexus.views = Nexus.views || {};
 
+  function t(key, vars, fallback) {
+    if (Nexus.i18n && typeof Nexus.i18n.t === 'function') {
+      const val = Nexus.i18n.t(key, vars);
+      if (val !== key || fallback === undefined) return val;
+    }
+    return fallback !== undefined ? fallback : key;
+  }
+
   Nexus.views.loaderProgress = function (state) {
     const progress = state.loaders && state.loaders.progress;
     if (!progress) return '';
@@ -18,16 +26,16 @@
         <div class="install-progress-head">
           <div>
             <strong>${escapeHtml(progress.versionId)}</strong>
-            <span class="install-phase">${escapeHtml(progress.phaseLabel || 'Procesando')}</span>
+            <span class="install-phase">${escapeHtml(progress.phaseLabel || t('versions.progressProcessing'))}</span>
           </div>
           ${active
-            ? '<button type="button" class="btn btn-xs btn-danger" data-action="loader-cancel">Cancelar</button>'
+            ? `<button type="button" class="btn btn-xs btn-danger" data-action="loader-cancel">${escapeHtml(t('versions.cancel'))}</button>`
             : `<span class="badge ${isError ? 'badge-error' : 'badge-installed'}">${escapeHtml(String(pct))}%</span>`}
         </div>
         <progress class="progress-track" max="100" value="${pct}"></progress>
         <div class="install-progress-stats">
-          <span>Progreso: ${escapeHtml(String(pct))}%</span>
-          ${progress.filesTotal ? `<span>Archivos: ${escapeHtml(String(progress.filesDone || 0))} / ${escapeHtml(String(progress.filesTotal))}</span>` : ''}
+          <span>${escapeHtml(t('versions.progressPct', { pct }))}</span>
+          ${progress.filesTotal ? `<span>${escapeHtml(t('versions.progressFiles', { done: progress.filesDone || 0, total: progress.filesTotal }))}</span>` : ''}
           ${progress.total ? `<span>${escapeHtml(formatBytes(progress.downloaded))} / ${escapeHtml(formatBytes(progress.total))}</span>` : ''}
         </div>
         ${progress.message ? `<p class="install-message">${escapeHtml(progress.message)}</p>` : ''}
@@ -55,13 +63,6 @@
     });
     const activeVersionId = state.config && state.config.launch ? state.config.launch.versionId : '';
 
-    const titleMap = {
-      fabric: 'Instalación de Fabric',
-      forge: 'Forge, NeoForge y Quilt',
-      neoforge: 'Forge, NeoForge y Quilt',
-      quilt: 'Forge, NeoForge y Quilt'
-    };
-
     const activeModLoader = kind === 'fabric'
       ? 'Fabric'
       : (loaders.loader === 'neoforge' ? 'NeoForge' : loaders.loader === 'quilt' ? 'Quilt' : 'Forge');
@@ -70,11 +71,9 @@
       <div class="page">
         ${settingsTabs(activeView)}
         ${pageHead(
-          'CARGADORES',
-          titleMap[kind] || 'Cargador de mods',
-          kind === 'fabric'
-            ? 'Instala Fabric Loader oficial para ejecutar Sodium, Lithium y paquetes FPS.'
-            : 'Alterna entre Forge, NeoForge y Quilt usando sus metadatos oficiales.',
+          t('loaders.eyebrow'),
+          kind === 'fabric' ? t('loaders.fabricTitle') : t('loaders.forgeTitle'),
+          kind === 'fabric' ? t('loaders.fabricSub') : t('loaders.forgeSub'),
           kind !== 'fabric'
             ? `<div class="loader-switch">
                  <button type="button" class="btn btn-sm ${loaders.loader !== 'neoforge' && loaders.loader !== 'quilt' ? 'btn-primary' : ''}"
@@ -94,42 +93,42 @@
         <section class="panel">
           <div class="panel-head">
             <div>
-              <h3>Instalar ${escapeHtml(activeModLoader)}</h3>
-              <p>Selecciona la versión de Minecraft y la build del cargador.</p>
+              <h3>${escapeHtml(t('loaders.installTitle', { loader: activeModLoader }))}</h3>
+              <p>${escapeHtml(t('loaders.installSub'))}</p>
             </div>
             <button type="button" class="btn btn-xs" data-action="loader-refresh" data-loader="${escapeHtml(kind)}">
-              <span data-icon="refresh"></span> Refrescar catálogo
+              <span data-icon="refresh"></span> ${escapeHtml(t('loaders.refresh'))}
             </button>
           </div>
 
           <div class="loader-form-grid">
             <div class="field">
-              <label for="loader-base">Versión base de Minecraft</label>
+              <label for="loader-base">${escapeHtml(t('loaders.baseLabel'))}</label>
               <select id="loader-base" data-loader="${escapeHtml(kind)}">
                 ${baseOptions.length
                   ? baseOptions.map((ver) => `<option value="${escapeHtml(ver)}"${loaders.base === ver ? ' selected' : ''}>${escapeHtml(ver)}</option>`).join('')
-                  : '<option value="">Instala primero una versión vanilla</option>'}
+                  : `<option value="">${escapeHtml(t('loaders.noVanilla'))}</option>`}
               </select>
             </div>
 
             <div class="field">
-              <label for="loader-version">Versión del cargador (${escapeHtml(String(visibleCatalog.length))} / ${escapeHtml(String(catalog.length))})</label>
+              <label for="loader-version">${escapeHtml(t('loaders.verLabel', { vis: visibleCatalog.length, total: catalog.length }))}</label>
               <select id="loader-version" ${loaders.versionState === 'loading' || !visibleCatalog.length ? 'disabled' : ''}>
                 ${loaders.versionState === 'loading'
-                  ? '<option value="">Cargando catálogo oficial…</option>'
+                  ? `<option value="">${escapeHtml(t('loaders.loading'))}</option>`
                   : visibleCatalog.length
-                    ? visibleCatalog.map((item) => `<option value="${escapeHtml(item.id)}"${loaders.selected === item.id ? ' selected' : ''}>${escapeHtml(item.label)}${item.stable ? ' (Estable)' : ''}</option>`).join('')
-                    : '<option value="">Sin builds compatibles</option>'}
+                    ? visibleCatalog.map((item) => `<option value="${escapeHtml(item.id)}"${loaders.selected === item.id ? ' selected' : ''}>${escapeHtml(item.label)}${item.stable ? ` (${escapeHtml(t('loaderBar.stable'))})` : ''}</option>`).join('')
+                    : `<option value="">${escapeHtml(t('loaders.noneCompat'))}</option>`}
               </select>
             </div>
 
             <div class="loader-form-actions">
               <button type="button" class="btn btn-primary" data-action="loader-install" data-loader="${escapeHtml(kind)}"
                       ${!loaders.base || !loaders.selected || (loaders.status && loaders.status.active) ? 'disabled' : ''}>
-                Instalar perfil
+                ${escapeHtml(t('loaders.installBtn'))}
               </button>
               ${catalog.length > visibleCatalog.length
-                ? `<button type="button" class="btn btn-sm" data-action="loader-show-more">Ver más builds</button>`
+                ? `<button type="button" class="btn btn-sm" data-action="loader-show-more">${escapeHtml(t('loaders.showMore'))}</button>`
                 : ''}
             </div>
           </div>
@@ -146,15 +145,15 @@
                       </div>
                       <button type="button" class="btn btn-sm ${isActive ? 'btn-primary' : ''}"
                               data-action="loader-select-profile" data-version-id="${escapeHtml(prof.id)}">
-                        ${isActive ? 'Activo' : 'Usar perfil'}
+                        ${escapeHtml(isActive ? t('versions.active') : t('loaders.useProfile'))}
                       </button>
                     </div>`;
                 }).join('')
-              : '<p class="muted">Todavía no hay perfiles instalados para este cargador.</p>'}
+              : `<p class="muted">${escapeHtml(t('loaders.noneInstalled'))}</p>`}
           </div>
         </section>
 
-        ${note('Consejo: usar Instalaciones independientes permite aislar mods y mundos por versión.')}
+        ${note(t('loaders.note'))}
       </div>`;
   };
 })();

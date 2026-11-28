@@ -6,6 +6,14 @@
 
   Nexus.views = Nexus.views || {};
 
+  function t(key, vars, fallback) {
+    if (Nexus.i18n && typeof Nexus.i18n.t === 'function') {
+      const val = Nexus.i18n.t(key, vars);
+      if (val !== key || fallback === undefined) return val;
+    }
+    return fallback !== undefined ? fallback : key;
+  }
+
   Nexus.views.accounts = function (state) {
     const auth = state.auth || {};
     const profile = auth.profile || null;
@@ -15,30 +23,30 @@
       <div class="page">
         ${settingsTabs('accounts')}
         ${pageHead(
-          'AUTENTICACIÓN',
-          'Cuentas Microsoft',
-          'Inicia sesión con tu cuenta oficial de Microsoft para servidores premium o alterna a Modo Offline en Jugadores.'
+          t('accounts.eyebrow'),
+          t('accounts.title'),
+          t('accounts.sub')
         )}
 
         <section class="account-hero">
           <div class="account-avatar"><span data-icon="${profile ? 'check' : 'user'}"></span></div>
           <div>
-            <h3>${profile ? escapeHtml(profile.name) : 'Sin cuenta Microsoft conectada'}</h3>
+            <h3>${profile ? escapeHtml(profile.name) : escapeHtml(t('accounts.none'))}</h3>
             <p>${profile
               ? `UUID: ${escapeHtml(profile.id || '—')}`
-              : 'Conecta tu cuenta oficial o usa un perfil local sin conexión en la pestaña Jugadores.'}</p>
+              : escapeHtml(t('accounts.noneDesc'))}</p>
           </div>
           ${profile
-            ? '<button type="button" class="btn btn-sm btn-danger" data-action="ms-logout">Cerrar sesión</button>'
-            : `<button type="button" class="btn btn-primary btn-sm" data-action="ms-login">Iniciar con Microsoft</button>`}
+            ? `<button type="button" class="btn btn-sm btn-danger" data-action="ms-logout">${escapeHtml(t('accounts.signOut'))}</button>`
+            : `<button type="button" class="btn btn-primary btn-sm" data-action="ms-login">${escapeHtml(t('accounts.signIn'))}</button>`}
         </section>
 
         <div class="auth-layout">
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Client ID personalizado (opcional)</h3>
-                <p>Solo necesario si utilizas tu propia aplicación registrada en Microsoft Entra ID.</p>
+                <h3>${escapeHtml(t('accounts.clientIdTitle'))}</h3>
+                <p>${escapeHtml(t('accounts.clientIdSub'))}</p>
               </div>
             </div>
             <div class="form-stack">
@@ -47,8 +55,8 @@
                 <input type="text" id="ms-client-id" placeholder="00000000-0000-0000-0000-000000000000" value="${escapeHtml(clientId)}">
               </div>
               <div class="auth-actions">
-                <button type="button" class="btn btn-sm" data-action="save-client-id">Guardar Client ID</button>
-                ${auth.canRestore ? '<button type="button" class="btn btn-sm" data-action="ms-restore">Restaurar sesión</button>' : ''}
+                <button type="button" class="btn btn-sm" data-action="save-client-id">${escapeHtml(t('accounts.saveClientId'))}</button>
+                ${auth.canRestore ? `<button type="button" class="btn btn-sm" data-action="ms-restore">${escapeHtml(t('accounts.restore'))}</button>` : ''}
               </div>
             </div>
           </section>
@@ -56,8 +64,8 @@
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Estado del almacenamiento</h3>
-                <p>Detalles locales del entorno actual.</p>
+                <h3>${escapeHtml(t('accounts.storageTitle'))}</h3>
+                <p>${escapeHtml(t('accounts.storageSub'))}</p>
               </div>
             </div>
             <p class="auth-meta"><strong>Backend:</strong> <code>${escapeHtml(auth.storageBackend || 'local')}</code></p>
@@ -65,7 +73,7 @@
           </section>
         </div>
 
-        ${note('¿Solo quieres jugar en servidores no-premium o en local? Ve a Jugadores y selecciona Modo Offline con cualquier nick.')}
+        ${note(t('accounts.note'))}
       </div>`;
   };
 })();

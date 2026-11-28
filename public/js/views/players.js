@@ -6,6 +6,14 @@
 
   Nexus.views = Nexus.views || {};
 
+  function t(key, vars, fallback) {
+    if (Nexus.i18n && typeof Nexus.i18n.t === 'function') {
+      const val = Nexus.i18n.t(key, vars);
+      if (val !== key || fallback === undefined) return val;
+    }
+    return fallback !== undefined ? fallback : key;
+  }
+
   Nexus.views.players = function (state) {
     const session = state.session || { mode: 'online', profile: null, locals: [], activeLocalId: null };
     const locals = Array.isArray(session.locals) ? session.locals : [];
@@ -15,16 +23,16 @@
     return `
       <div class="page">
         ${pageHead(
-          'IDENTIDAD DE JUGADOR',
-          'Modo y jugadores',
-          'Elige entre iniciar con tu cuenta oficial de Microsoft (Online) o crear perfiles locales sin conexión (Offline).'
+          t('players.eyebrow'),
+          t('players.title'),
+          t('players.sub')
         )}
 
         <section class="panel">
           <div class="panel-head">
             <div>
-              <h3>Modo de sesión</h3>
-              <p>Cambia el modo activo antes de pulsar JUGAR.</p>
+              <h3>${escapeHtml(t('players.modeTitle'))}</h3>
+              <p>${escapeHtml(t('players.modeSub'))}</p>
             </div>
           </div>
           <div class="mode-grid">
@@ -32,8 +40,8 @@
                     data-action="session-mode" data-mode="online">
               <span class="mode-icon" data-icon="shield"></span>
               <span class="mode-copy">
-                <strong>Modo Online (Microsoft)</strong>
-                <small>Para servidores oficiales y verificación Xbox Live / Mojang.</small>
+                <strong>${escapeHtml(t('players.onlineTitle'))}</strong>
+                <small>${escapeHtml(t('players.onlineSub'))}</small>
               </span>
             </button>
 
@@ -41,15 +49,15 @@
                     data-action="session-mode" data-mode="offline">
               <span class="mode-icon" data-icon="user"></span>
               <span class="mode-copy">
-                <strong>Modo Offline (Local)</strong>
-                <small>Usa cualquier nombre local sin cuenta Microsoft ni internet.</small>
+                <strong>${escapeHtml(t('players.offlineTitle'))}</strong>
+                <small>${escapeHtml(t('players.offlineSub'))}</small>
               </span>
             </button>
           </div>
 
           <div class="active-session">
-            <strong>Sesión actual:</strong>
-            <span>${activeProfile ? escapeHtml(activeProfile.name) : 'Sin jugador activo'}</span>
+            <strong>${escapeHtml(t('players.currentSession'))}</strong>
+            <span>${escapeHtml(activeProfile ? activeProfile.name : t('players.noActivePlayer'))}</span>
             <code>${activeMode.toUpperCase()}</code>
           </div>
         </section>
@@ -57,19 +65,19 @@
         <section class="panel">
           <div class="panel-head">
             <div>
-              <h3>Perfiles locales (Offline)</h3>
-              <p>Crea o renombra tus nicks locales (1–16 caracteres, letras, números o guion bajo).</p>
+              <h3>${escapeHtml(t('players.localsTitle'))}</h3>
+              <p>${escapeHtml(t('players.localsSub'))}</p>
             </div>
           </div>
 
           <div class="loader-form-grid" style="max-width:460px;">
             <div class="field">
-              <label for="new-player-name">Nuevo jugador local</label>
-              <input type="text" id="new-player-name" maxlength="16" placeholder="Ej. PanWarrior">
+              <label for="new-player-name">${escapeHtml(t('players.newLabel'))}</label>
+              <input type="text" id="new-player-name" maxlength="16" placeholder="${escapeHtml(t('players.newPh'))}">
             </div>
             <div>
               <button type="button" class="btn btn-primary btn-sm" data-action="player-create">
-                <span data-icon="plus"></span> Crear perfil
+                <span data-icon="plus"></span> ${escapeHtml(t('players.createBtn'))}
               </button>
             </div>
           </div>
@@ -89,25 +97,25 @@
                       </div>
                       <div class="player-actions">
                         <input type="text" class="player-name-input" maxlength="16"
-                               aria-label="Nombre de ${escapeHtml(player.name)}"
+                               aria-label="${escapeHtml(t('players.renameAria', { name: player.name }))}"
                                data-player-name="${escapeHtml(player.id)}"
                                value="${escapeHtml(player.name)}">
-                        <button type="button" class="btn btn-xs" data-action="player-save" data-player-id="${escapeHtml(player.id)}">Renombrar</button>
+                        <button type="button" class="btn btn-xs" data-action="player-save" data-player-id="${escapeHtml(player.id)}">${escapeHtml(t('players.renameBtn'))}</button>
                         <button type="button" class="btn btn-xs ${isActive ? '' : 'btn-primary'}"
                                 data-action="player-select" data-player-id="${escapeHtml(player.id)}" ${isActive ? 'disabled' : ''}>
-                          ${isActive ? 'Activo' : 'Seleccionar'}
+                          ${escapeHtml(isActive ? t('players.activeBtn') : t('players.selectBtn'))}
                         </button>
-                        <button type="button" class="btn btn-xs btn-danger" data-action="player-remove" data-player-id="${escapeHtml(player.id)}">
+                        <button type="button" class="btn btn-xs btn-danger" data-action="player-remove" data-player-id="${escapeHtml(player.id)}" aria-label="${escapeHtml(t('confirm.confirm'))}">
                           <span data-icon="trash"></span>
                         </button>
                       </div>
                     </div>`;
                 }).join('')
-              : '<p class="muted">Todavía no has creado ningún perfil local.</p>'}
+              : `<p class="muted">${escapeHtml(t('players.emptyLocals'))}</p>`}
           </div>
         </section>
 
-        ${note('En Modo Offline se genera un UUID determinista compatible con servidores locales y no-premium.')}
+        ${note(t('players.note'))}
       </div>`;
   };
 })();

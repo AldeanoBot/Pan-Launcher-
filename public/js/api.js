@@ -146,6 +146,16 @@
         ? bridge.mods.disableIncompatible(mcVersion, loader)
         : unavailable()),
       openFolder: () => (bridge && bridge.mods ? bridge.mods.openFolder() : unavailable())
+    }),
+    resourcePacks: Object.freeze({
+      list: () => (bridge && bridge.resourcePacks ? bridge.resourcePacks.list() : Promise.resolve([])),
+      addFiles: (files) => (bridge && bridge.resourcePacks ? bridge.resourcePacks.addFiles(files) : unavailable()),
+      toggle: (id, enabled) => (bridge && bridge.resourcePacks ? bridge.resourcePacks.toggle(id, enabled) : unavailable()),
+      remove: (id) => (bridge && bridge.resourcePacks ? bridge.resourcePacks.remove(id) : unavailable()),
+      disableIncompatible: (mcVersion) => (bridge && bridge.resourcePacks
+        ? bridge.resourcePacks.disableIncompatible(mcVersion)
+        : unavailable()),
+      openFolder: () => (bridge && bridge.resourcePacks ? bridge.resourcePacks.openFolder() : unavailable())
     })
   });
 })();

@@ -3,16 +3,29 @@
 
   const Nexus = (window.Nexus = window.Nexus || {});
 
+  function tr(key, vars, fallback) {
+    if (Nexus.i18n && typeof Nexus.i18n.t === 'function') {
+      const translated = Nexus.i18n.t(key, vars);
+      if (translated !== key || !fallback) return translated;
+    }
+    return String(fallback || key);
+  }
+
   const HARDWARE_BASELINE_FPS = Object.freeze({
     low: 42,
     mid: 102,
     high: 195
   });
 
-  let cachedDeviceProbe = null;
+  let cachedDeviceRaw = null;
 
   function detectDeviceHardware() {
-    if (cachedDeviceProbe) return cachedDeviceProbe;
+    if (cachedDeviceRaw) {
+      return {
+        ...cachedDeviceRaw,
+        gpuName: cachedDeviceRaw.gpuExposed ? cachedDeviceRaw.rawGpuName : tr('perf.gpuNotExposed', null, 'GPU no expuesta por navegador')
+      };
+    }
 
     const cores = Math.max(1, Number(navigator.hardwareConcurrency) || 4);
     const navMem = Number(navigator.deviceMemory) || null;
@@ -21,7 +34,8 @@
       ? Math.round((osInfo.totalRamMb / 1024) * 10) / 10
       : navMem;
 
-    let gpuName = 'GPU no expuesta por navegador';
+    let rawGpuName = '';
+    let gpuExposed = false;
     let gpuVendor = '';
     let isSoftwareRenderer = false;
     try {
@@ -36,11 +50,12 @@
           ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL)
           : gl.getParameter(gl.VENDOR);
         if (rawRenderer) {
-          gpuName = String(rawRenderer)
+          rawGpuName = String(rawRenderer)
             .replace(/^ANGLE \((?:[^,]+,\s*)?/, '')
             .replace(/Direct3D.*$/, '')
             .replace(/\)$/, '')
             .trim();
+          gpuExposed = Boolean(rawGpuName);
         }
         if (rawVendor) gpuVendor = String(rawVendor);
       }
@@ -48,7 +63,7 @@
       // Ignora si WebGL está restringido
     }
 
-    const gpuLower = `${gpuName} ${gpuVendor}`.toLowerCase();
+    const gpuLower = `${rawGpuName} ${gpuVendor}`.toLowerCase();
     isSoftwareRenderer = /swiftshader|llvmpipe|software|microsoft basic render/.test(gpuLower);
     const isNvidia = /nvidia|geforce|rtx|gtx/.test(gpuLower);
     const isAppleSilicon = /apple m[1-9]|apple gpu/.test(gpuLower);
@@ -86,19 +101,23 @@
     const widthPx = Math.round((window.screen && window.screen.width ? window.screen.width : 1920) * dpr);
     const heightPx = Math.round((window.screen && window.screen.height ? window.screen.height : 1080) * dpr);
 
-    cachedDeviceProbe = {
+    cachedDeviceRaw = {
       detectedTier,
       cores,
       ramGb: totalRamGb,
       ramCappedByBrowser: !osInfo && navMem === 8,
-      gpuName,
+      rawGpuName,
+      gpuExposed,
       isNvidia,
       isAppleSilicon,
       isSoftwareRenderer,
       screenRes: `${widthPx}×${heightPx}`,
       pixelFactor: widthPx * heightPx > 3200000 ? 0.86 : widthPx * heightPx <= 1200000 ? 1.08 : 1.0
     };
-    return cachedDeviceProbe;
+    return {
+      ...cachedDeviceRaw,
+      gpuName: gpuExposed ? rawGpuName : tr('perf.gpuNotExposed', null, 'GPU no expuesta por navegador')
+    };
   }
 
   const PERF_PRESETS = Object.freeze({
@@ -408,11 +427,12 @@
     const exportLoader = perf.exportLoader === 'NeoForge' ? 'NeoForge' : 'Fabric';
     const mods = PERF_MODS.map((m) => ({
       ...m,
+      description: tr(`perf.mod.${m.id}.desc`, null, m.description),
       enabled: enabledIds.includes(m.id)
     }));
     return {
       presetId: preset.id,
-      presetName: preset.name,
+      presetName: tr(`perf.preset.${preset.id}.name`, null, preset.name),
       hardwareMode,
       hardwareTier,
       exportLoader,
@@ -440,7 +460,7 @@
             conflicts.push({
               modA: mod.id,
               modB: other.id,
-              label: `${mod.name} es incompatible con ${other.name}`
+              label: tr('perf.conflictPair', { a: mod.name, b: other.name }, `${mod.name} es incompatible con ${other.name}`)
             });
           }
         }
@@ -632,27 +652,27 @@
     const reqJava = resolveJavaMajorFromVersion(versionId);
 
     if (enabledIds.has('optifine')) {
-      warnings.push('OptiFine Legacy no se distribuye en Modrinth; no se descargará dentro del .mrpack automático.');
+      warnings.push(tr('perf.warn.optifine', null, 'OptiFine Legacy no se distribuye en Modrinth; no se descargará dentro del .mrpack automático.'));
     }
     if (enabledIds.has('immediatelyfast')) {
-      warnings.push('ImmediatelyFast está activado: en algunas versiones de Sodium/1.21+ puede provocar cierres al reaparecer tras morir.');
+      warnings.push(tr('perf.warn.immediatelyfast', null, 'ImmediatelyFast está activado: en algunas versiones de Sodium/1.21+ puede provocar cierres al reaparecer tras morir.'));
     }
     if (enabledIds.has('moreculling')) {
-      warnings.push('MoreCulling está activado: puede provocar cierres en servidores que descargan paquetes de recursos propios.');
+      warnings.push(tr('perf.warn.moreculling', null, 'MoreCulling está activado: puede provocar cierres en servidores que descargan paquetes de recursos propios.'));
     }
-    if (enabledIds.has('nvidium') && normalized.device && !normalized.device.isSoftwareRenderer && !normalized.device.isNvidia && !/no expuesta/i.test(normalized.device.gpuName)) {
-      warnings.push(`Nvidium requiere GPU NVIDIA GTX 16xx/RTX (tu navegador reporta: ${normalized.device.gpuName}).`);
+    if (enabledIds.has('nvidium') && normalized.device && !normalized.device.isSoftwareRenderer && !normalized.device.isNvidia && normalized.device.gpuExposed) {
+      warnings.push(tr('perf.warn.nvidium', { gpu: normalized.device.gpuName }, `Nvidium requiere GPU NVIDIA GTX 16xx/RTX (tu navegador reporta: ${normalized.device.gpuName}).`));
     }
     if (normalized.jvm.gc === 'ZGC' && reqJava !== null && reqJava < 21) {
-      warnings.push(`Minecraft ${versionId} usa Java ${reqJava} donde ZGC Generacional no está disponible; se aplicará G1GC seguro o cambia a G1GC.`);
+      warnings.push(tr('perf.warn.zgcOld', { ver: versionId, java: reqJava }, `Minecraft ${versionId} usa Java ${reqJava} donde ZGC Generacional no está disponible; se aplicará G1GC seguro o cambia a G1GC.`));
     }
     if (enabledIds.has('c2me') && normalized.device && normalized.device.cores < 4) {
-      warnings.push(`C2ME aprovecha 6+ hilos de CPU; este dispositivo reporta ${normalized.device.cores} hilos.`);
+      warnings.push(tr('perf.warn.c2me', { cores: normalized.device.cores }, `C2ME aprovecha 6+ hilos de CPU; este dispositivo reporta ${normalized.device.cores} hilos.`));
     }
     if (normalized.exportLoader === 'NeoForge') {
       const fabricOnly = ['krypton', 'nvidium', 'vulkanmod', 'moreculling'].filter((id) => enabledIds.has(id));
       if (fabricOnly.length) {
-        warnings.push(`Para .mrpack en NeoForge se omitirán mods exclusivos de Fabric (${fabricOnly.join(', ')}).`);
+        warnings.push(tr('perf.warn.neoforgeFabricOnly', { mods: fabricOnly.join(', ') }, `Para .mrpack en NeoForge se omitirán mods exclusivos de Fabric (${fabricOnly.join(', ')}).`));
       }
     }
     return warnings;

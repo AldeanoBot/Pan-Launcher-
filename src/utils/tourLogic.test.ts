@@ -11,12 +11,20 @@ import {
 } from './tourLogic';
 
 test('tourLogic', async (t) => {
+  await t.test('includes resourcepacks step directly after mods step', () => {
+    const modsIdx = TOUR_STEPS.findIndex((s) => s.id === 'mods');
+    const rpacksIdx = TOUR_STEPS.findIndex((s) => s.id === 'resourcepacks');
+    assert.ok(modsIdx >= 0, 'mods step must exist');
+    assert.equal(rpacksIdx, modsIdx + 1, 'resourcepacks step must follow mods');
+    assert.equal(TOUR_STEPS.length, 9);
+  });
+
   await t.test('clamps step index safely within valid range', () => {
-    assert.equal(clampStepIndex(-5, 8), 0);
-    assert.equal(clampStepIndex(0, 8), 0);
-    assert.equal(clampStepIndex(4, 8), 4);
-    assert.equal(clampStepIndex(99, 8), 7);
-    assert.equal(clampStepIndex(Number.NaN, 8), 0);
+    assert.equal(clampStepIndex(-5, 9), 0);
+    assert.equal(clampStepIndex(0, 9), 0);
+    assert.equal(clampStepIndex(4, 9), 4);
+    assert.equal(clampStepIndex(99, 9), 8);
+    assert.equal(clampStepIndex(Number.NaN, 9), 0);
   });
 
   await t.test('evaluates first-install auto-start and query overrides', () => {
@@ -60,8 +68,9 @@ test('tourLogic', async (t) => {
     assert.ok(mobile.top >= 14 && mobile.top + 200 <= 844 - 14);
   });
 
-  await t.test('browser public/js/tour.js exposes matching steps and positioning logic', () => {
-    const code = fs.readFileSync(path.resolve(process.cwd(), 'public/js/tour.js'), 'utf8');
+  await t.test('browser public/js/tour.js exposes matching steps, i18n titles, and getActiveIndex', () => {
+    const i18nCode = fs.readFileSync(path.resolve(process.cwd(), 'public/js/i18n.js'), 'utf8');
+    const tourCode = fs.readFileSync(path.resolve(process.cwd(), 'public/js/tour.js'), 'utf8');
     const storage = new Map<string, string>();
     const context: Record<string, unknown> = {
       window: {
@@ -79,8 +88,10 @@ test('tourLogic', async (t) => {
         setTimeout: (fn: () => void) => { fn(); return 1; },
       },
       document: {
+        documentElement: { lang: 'es' },
         getElementById: () => null,
         querySelector: () => null,
+        querySelectorAll: () => [],
         createElement: () => ({}),
         addEventListener: () => {},
         removeEventListener: () => {},
@@ -88,14 +99,20 @@ test('tourLogic', async (t) => {
       },
     };
     (context.window as Record<string, unknown>).window = context.window;
-    vm.runInNewContext(code, context);
-    const tour = ((context.window as Record<string, unknown>).Nexus as Record<string, unknown>).tour as {
-      steps: Array<{ id: string }>;
-      shouldAutoStart: () => boolean;
-      computePopoverPosition: typeof computePopoverPosition;
+    vm.runInNewContext(i18nCode, context);
+    vm.runInNewContext(tourCode, context);
+    const nexus = (context.window as Record<string, unknown>).Nexus as {
+      i18n: { setLang: (lang: string, opts?: Record<string, unknown>) => string };
+      tour: {
+        steps: Array<{ id: string }>;
+        shouldAutoStart: () => boolean;
+        getActiveIndex: () => number;
+        computePopoverPosition: typeof computePopoverPosition;
+      };
     };
-    assert.equal(tour.steps.length, TOUR_STEPS.length);
-    assert.deepEqual([...tour.steps].map((s) => s.id), TOUR_STEPS.map((s) => s.id));
-    assert.equal(tour.shouldAutoStart(), true);
+    assert.equal(nexus.tour.steps.length, TOUR_STEPS.length);
+    assert.deepEqual([...nexus.tour.steps].map((s) => s.id), TOUR_STEPS.map((s) => s.id));
+    assert.equal(nexus.tour.shouldAutoStart(), true);
+    assert.equal(typeof nexus.tour.getActiveIndex, 'function');
   });
 });

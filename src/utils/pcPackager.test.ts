@@ -44,7 +44,7 @@ test('buildWindowsExe injects valid .panpkg PE section and recomputes PE CheckSu
   assert.ok(Buffer.compare(extractedZip, mockZip) === 0, 'Extracted .panpkg bytes must match input zip');
 });
 
-test('buildWindowsSelfContainedBat embeds run.ps1, server.ps1, launch.ps1 and zip payload', () => {
+test('buildWindowsSelfContainedBat embeds hardened run.ps1, server.ps1, launch.ps1, resourcepacks, and zip payload', () => {
   const fakeZipB64 = Buffer.from('PK_MOCK_ZIP').toString('base64');
   const bat = buildWindowsSelfContainedBat(fakeZipB64, '2.0.1');
 
@@ -64,7 +64,6 @@ test('buildWindowsSelfContainedBat embeds run.ps1, server.ps1, launch.ps1 and zi
   assert.match(decodedRunPs1, /--app=\$url/);
   assert.match(decodedRunPs1, /launch\.ps1/);
 
-  // Decode server.ps1, launch.ps1, and PanLauncherApp.cs embedded inside run.ps1
   const b64Matches = [...decodedRunPs1.matchAll(/FromBase64String\('([A-Za-z0-9+/=]+)'\)/g)];
   assert.equal(b64Matches.length, 3, 'run.ps1 must embed server.ps1, launch.ps1, and PanLauncherApp.cs');
 
@@ -79,6 +78,14 @@ test('buildWindowsSelfContainedBat embeds run.ps1, server.ps1, launch.ps1 and zi
   assert.match(serverPs1, /api\/local\/mods\/upload/);
   assert.match(serverPs1, /api\/local\/mods\/delete/);
   assert.match(serverPs1, /api\/local\/mods\/open-folder/);
+  assert.match(serverPs1, /api\/local\/resourcepacks/);
+  assert.match(serverPs1, /api\/local\/resourcepacks\/file/);
+  assert.match(serverPs1, /api\/local\/resourcepacks\/upload/);
+  assert.match(serverPs1, /api\/local\/resourcepacks\/delete/);
+  assert.match(serverPs1, /api\/local\/resourcepacks\/open-folder/);
+  assert.match(serverPs1, /Test-IsLoopbackOrigin/);
+  assert.match(serverPs1, /Test-BlockedIpAddress/);
+  assert.doesNotMatch(serverPs1, /Access-Control-Allow-Origin.*'\*'/);
   assert.match(serverPs1, /api\/mc\/ping/);
   assert.match(serverPs1, /api\/pc\/download-app/);
   assert.match(serverPs1, /Resolve-LoaderCatalog/);
@@ -110,6 +117,7 @@ test('buildWindowsSelfContainedBat embeds run.ps1, server.ps1, launch.ps1 and zi
   assert.match(launchPs1, /Sync-InstanceBackToShared/);
   assert.match(launchPs1, /servers\.dat/);
   assert.match(launchPs1, /screenshots/);
+  assert.match(launchPs1, /resourcepacks/);
   assert.match(launchPs1, /Open-PanUiWindow/);
   assert.match(launchPs1, /javaw\.exe/);
   assert.match(launchPs1, /--quickPlayMultiplayer/);
@@ -118,6 +126,8 @@ test('buildWindowsSelfContainedBat embeds run.ps1, server.ps1, launch.ps1 and zi
   assert.match(launchPs1, /Find-CrashTailSafe/);
   assert.match(launchPs1, /pan-custom-mods\.json/);
   assert.match(launchPs1, /customModFiles/);
+  assert.match(launchPs1, /incompatibleResourcePacks:\[\]/);
+  assert.match(launchPs1, /sharedOptPath/);
   assert.ok(!/"\$\{(auth_|natives_|classpath|launcher_|version_|game_|assets_)/.test(launchPs1), 'Must use single quotes for Mojang template tokens in PowerShell');
 
   const panAppCs = Buffer.from(b64Matches[2][1], 'base64').toString('utf8');
@@ -129,7 +139,7 @@ test('buildWindowsSelfContainedBat embeds run.ps1, server.ps1, launch.ps1 and zi
   assert.match(decodedRunPs1, /Pan-launcher\.lnk/);
 });
 
-test('buildUnixSelfContainedSh embeds valid Python 3 Minecraft Java backend and bash script', () => {
+test('buildUnixSelfContainedSh embeds hardened Python 3 backend with resourcepacks, CORS, and SSRF protection', () => {
   const fakeZipB64 = Buffer.from('PK_MOCK_ZIP').toString('base64');
   const sh = buildUnixSelfContainedSh(fakeZipB64, '2.0.1');
 
@@ -150,6 +160,14 @@ test('buildUnixSelfContainedSh embeds valid Python 3 Minecraft Java backend and 
   assert.match(serverPy, /api\/local\/mods\/upload/);
   assert.match(serverPy, /api\/local\/mods\/delete/);
   assert.match(serverPy, /api\/local\/mods\/open-folder/);
+  assert.match(serverPy, /api\/local\/resourcepacks/);
+  assert.match(serverPy, /api\/local\/resourcepacks\/file/);
+  assert.match(serverPy, /api\/local\/resourcepacks\/upload/);
+  assert.match(serverPy, /api\/local\/resourcepacks\/delete/);
+  assert.match(serverPy, /api\/local\/resourcepacks\/open-folder/);
+  assert.match(serverPy, /_check_origin/);
+  assert.match(serverPy, /is_blocked_ip/);
+  assert.doesNotMatch(serverPy, /"Access-Control-Allow-Origin", "\*"/);
   assert.match(serverPy, /pan-custom-mods\.json/);
   assert.match(serverPy, /customModFiles/);
   assert.match(serverPy, /meta\.quiltmc\.org\/v3\/versions\/loader/);
@@ -165,9 +183,12 @@ test('buildUnixSelfContainedSh embeds valid Python 3 Minecraft Java backend and 
   assert.match(serverPy, /sync_instance_back_to_shared/);
   assert.match(serverPy, /servers\.dat/);
   assert.match(serverPy, /screenshots/);
+  assert.match(serverPy, /resourcepacks/);
   assert.match(serverPy, /open_launcher_ui/);
   assert.match(serverPy, /watch_mc_exit/);
   assert.match(serverPy, /find_crash_tail/);
+  assert.match(serverPy, /incompatibleResourcePacks:\[\]/);
+  assert.match(serverPy, /shared_dir \/ "options\.txt"/);
   assert.match(serverPy, /version_type.*==.*"release"/);
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pan-unix-test-'));

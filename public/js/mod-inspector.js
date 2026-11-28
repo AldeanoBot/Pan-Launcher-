@@ -4,6 +4,14 @@
   const Nexus = (window.Nexus = window.Nexus || {});
   const VALID_MOD_LOADERS = ['fabric', 'forge', 'neoforge', 'quilt'];
 
+  function tr(key, vars, fallback) {
+    if (Nexus.i18n && typeof Nexus.i18n.t === 'function') {
+      const translated = Nexus.i18n.t(key, vars);
+      if (translated !== key || !fallback) return translated;
+    }
+    return String(fallback || key);
+  }
+
   function normalizeLoaderId(raw) {
     const low = String(raw || 'vanilla').trim().toLowerCase();
     return VALID_MOD_LOADERS.includes(low) ? low : 'vanilla';
@@ -281,7 +289,7 @@
 
     if (entries && entries.fabricJson) {
       try {
-        const f = JSON.parse(entries.fabricJson);
+        const f = JSON.parse(String(entries.fabricJson).replace(/^\uFEFF/, ''));
         modId = String(f.id || '');
         name = String(f.name || f.id || '');
         version = String(f.version || '');
@@ -296,7 +304,7 @@
 
     if (entries && entries.quiltJson) {
       try {
-        const q = JSON.parse(entries.quiltJson);
+        const q = JSON.parse(String(entries.quiltJson).replace(/^\uFEFF/, ''));
         const ql = q.quilt_loader || {};
         const meta = ql.metadata || {};
         if (!modId) modId = String(ql.id || '');
@@ -338,7 +346,7 @@
 
     if (entries && entries.mcmodInfo) {
       try {
-        const parsed = JSON.parse(entries.mcmodInfo);
+        const parsed = JSON.parse(String(entries.mcmodInfo).replace(/^\uFEFF/, ''));
         const first = Array.isArray(parsed)
           ? parsed[0]
           : (Array.isArray(parsed && parsed.modList) ? parsed.modList[0] : null);
@@ -388,7 +396,7 @@
         compatible: false,
         status: 'incompatible',
         reasonCode: 'vanilla-loader',
-        reason: 'Estás en modo Vanilla (no carga mods). Cambia a Fabric, Forge, NeoForge o Quilt.'
+        reason: tr('mods.compat.vanilla', null, 'Estás en modo Vanilla (no carga mods). Cambia a Fabric, Forge, NeoForge o Quilt.')
       };
     }
 
@@ -398,11 +406,12 @@
         (targetLoader === 'quilt' && loaders.includes('fabric'));
       if (!supportsLoader) {
         const expected = loaders.map(loaderDisplayName).join(' / ');
+        const current = loaderDisplayName(targetLoader);
         return {
           compatible: false,
           status: 'incompatible',
           reasonCode: 'wrong-loader',
-          reason: `Requiere ${expected}, pero tienes ${loaderDisplayName(targetLoader)} seleccionado.`
+          reason: tr('mods.compat.wrongLoader', { expected, current }, `Requiere ${expected}, pero tienes ${current} seleccionado.`)
         };
       }
     }
@@ -412,24 +421,26 @@
         compatible: false,
         status: 'incompatible',
         reasonCode: 'wrong-version',
-        reason: `Compatible con Minecraft ${mod.mcVersionSpec}, incompatible con ${mcVer}.`
+        reason: tr('mods.compat.wrongVersion', { spec: mod.mcVersionSpec, mc: mcVer }, `Compatible con Minecraft ${mod.mcVersionSpec}, incompatible con ${mcVer}.`)
       };
     }
 
     if (!mod || !mod.mcVersionSpec) {
+      const loaderName = loaderDisplayName(targetLoader);
       return {
         compatible: true,
         status: 'compatible',
         reasonCode: 'open-version',
-        reason: `Listo para ${loaderDisplayName(targetLoader)} ${mcVer} (sin restricción de versión).`
+        reason: tr('mods.compat.openVersion', { loader: loaderName, mc: mcVer }, `Listo para ${loaderName} ${mcVer} (sin restricción de versión).`)
       };
     }
 
+    const loaderName = loaderDisplayName(targetLoader);
     return {
       compatible: true,
       status: 'compatible',
       reasonCode: 'compatible',
-      reason: `Compatible con Minecraft ${mcVer} (${loaderDisplayName(targetLoader)}).`
+      reason: tr('mods.compat.ok', { mc: mcVer, loader: loaderName }, `Compatible con Minecraft ${mcVer} (${loaderName}).`)
     };
   }
 
@@ -486,7 +497,11 @@
       const localHeaderOffset = view.getUint32(ptr + 42, true);
 
       if (ptr + 46 + nameLen > bytes.length) break;
-      const entryName = decoder.decode(bytes.subarray(ptr + 46, ptr + 46 + nameLen)).toLowerCase();
+      const entryName = decoder
+        .decode(bytes.subarray(ptr + 46, ptr + 46 + nameLen))
+        .replace(/\\/g, '/')
+        .replace(/^(\.\/|\/)+/, '')
+        .toLowerCase();
       ptr += 46 + nameLen + extraLen + commentLen;
 
       const targetKey = TARGETS[entryName];

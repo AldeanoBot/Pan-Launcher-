@@ -251,6 +251,11 @@ static int OnExtractZipEntry(
     void* user) {
   (void)user;
 
+  if (!name || !name[0] || name[0] == '/' || name[0] == '\\' ||
+      strstr(name, "..") != NULL || strchr(name, ':') != NULL) {
+    return 0;
+  }
+
   wchar_t wRel[512];
   if (MultiByteToWideChar(CP_UTF8, 0, name, -1, wRel, 512) <= 0) {
     return 0;
@@ -259,11 +264,22 @@ static int OnExtractZipEntry(
     if (wRel[i] == L'/') wRel[i] = L'\\';
   }
 
-  wchar_t destPath[MAX_PATH];
-  if (_snwprintf(destPath, MAX_PATH, L"%ls\\%ls", g_baseDir, wRel) >= MAX_PATH) {
+  wchar_t rawDest[MAX_PATH];
+  if (_snwprintf(rawDest, MAX_PATH, L"%ls\\%ls", g_baseDir, wRel) >= MAX_PATH) {
     return 0;
   }
-  destPath[MAX_PATH - 1] = L'\0';
+  rawDest[MAX_PATH - 1] = L'\0';
+
+  wchar_t canonBase[MAX_PATH], destPath[MAX_PATH];
+  DWORD bl = GetFullPathNameW(g_baseDir, MAX_PATH, canonBase, NULL);
+  DWORD dl = GetFullPathNameW(rawDest, MAX_PATH, destPath, NULL);
+  if (bl == 0 || bl >= MAX_PATH || dl == 0 || dl >= MAX_PATH) {
+    return 0;
+  }
+  if (_wcsnicmp(destPath, canonBase, bl) != 0 ||
+      (destPath[bl] != L'\\' && destPath[bl] != L'\0')) {
+    return 0;
+  }
 
   wchar_t dirOnly[MAX_PATH];
   wcsncpy(dirOnly, destPath, MAX_PATH - 1);

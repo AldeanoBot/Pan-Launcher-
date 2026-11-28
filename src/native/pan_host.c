@@ -220,6 +220,21 @@ static int SendAll(SOCKET s, const char* data, size_t len) {
   return 1;
 }
 
+static __declspec(thread) char t_corsOrigin[256] = "";
+
+static int IsLoopbackOriginA(const char* origin) {
+  if (!origin || !origin[0]) return 0;
+  const char* p = NULL;
+  if (_strnicmp(origin, "http://", 7) == 0) p = origin + 7;
+  else if (_strnicmp(origin, "https://", 8) == 0) p = origin + 8;
+  else return 0;
+
+  if (_strnicmp(p, "localhost", 9) == 0 && (p[9] == '\0' || p[9] == ':')) return 1;
+  if (strncmp(p, "127.0.0.1", 9) == 0 && (p[9] == '\0' || p[9] == ':')) return 1;
+  if (strncmp(p, "[::1]", 5) == 0 && (p[5] == '\0' || p[5] == ':')) return 1;
+  return 0;
+}
+
 static void SendHttpResponse(
     SOCKET s,
     int code,
@@ -229,7 +244,12 @@ static void SendHttpResponse(
     size_t bodyLen,
     int noStore,
     const char* extraHeaders) {
-  char hdr[1536];
+  char corsLine[384] = "";
+  if (t_corsOrigin[0] && IsLoopbackOriginA(t_corsOrigin)) {
+    _snprintf(corsLine, sizeof(corsLine), "Access-Control-Allow-Origin: %s\r\nVary: Origin\r\n", t_corsOrigin);
+    corsLine[sizeof(corsLine) - 1] = '\0';
+  }
+  char hdr[1792];
   int hlen = _snprintf(
       hdr,
       sizeof(hdr),
@@ -237,7 +257,9 @@ static void SendHttpResponse(
       "Content-Type: %s\r\n"
       "Content-Length: %llu\r\n"
       "Connection: close\r\n"
-      "Access-Control-Allow-Origin: *\r\n"
+      "X-Content-Type-Options: nosniff\r\n"
+      "Referrer-Policy: no-referrer\r\n"
+      "%s"
       "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
       "Access-Control-Allow-Headers: Content-Type\r\n"
       "%s%s\r\n",
@@ -245,6 +267,7 @@ static void SendHttpResponse(
       statusText,
       contentType,
       (unsigned long long)bodyLen,
+      corsLine,
       noStore ? "Cache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\n" : "",
       extraHeaders ? extraHeaders : "");
   if (hlen > 0) {
@@ -256,7 +279,12 @@ static void SendHttpResponse(
 }
 
 static void SendJsonResponse(SOCKET s, int code, const char* jsonBody) {
-  const char* st = (code == 200) ? "OK" : (code == 400) ? "Bad Request" : (code == 404) ? "Not Found" : "Internal Server Error";
+  const char* st =
+      (code == 200) ? "OK" :
+      (code == 400) ? "Bad Request" :
+      (code == 403) ? "Forbidden" :
+      (code == 404) ? "Not Found" :
+      (code == 413) ? "Payload Too Large" : "Internal Server Error";
   SendHttpResponse(s, code, st, "application/json; charset=utf-8", jsonBody, strlen(jsonBody), 1, NULL);
 }
 
@@ -334,6 +362,62 @@ static void ExtractMotdText(const PanJsonValue* desc, char* out, size_t cap) {
   }
 }
 
+static int IsSafeHostnameA(const char* h) {
+  if (!h || !h[0] || strlen(h) > 253) return 0;
+  for (size_t i = 0; h[i]; i++) {
+    unsigned char c = (unsigned char)h[i];
+    if (!(isalnum(c) || c == '.' || c == '-' || c == '_')) return 0;
+  }
+  return 1;
+}
+
+static int IsBlockedIpv4Num(uint32_t ip) {
+  uint8_t b0 = (uint8_t)(ip >> 24);
+  uint8_t b1 = (uint8_t)((ip >> 16) & 0xFF);
+  uint8_t b2 = (uint8_t)((ip >> 8) & 0xFF);
+  if (b0 == 0 || b0 == 10 || b0 == 127) return 1;
+  if (b0 == 100 && b1 >= 64 && b1 <= 127) return 1;
+  if (b0 == 169 && b1 == 254) return 1;
+  if (b0 == 172 && b1 >= 16 && b1 <= 31) return 1;
+  if (b0 == 192 && b1 == 0 && b2 == 0) return 1;
+  if (b0 == 192 && b1 == 0 && b2 == 2) return 1;
+  if (b0 == 192 && b1 == 168) return 1;
+  if (b0 == 198 && (b1 == 18 || b1 == 19)) return 1;
+  if (b0 == 198 && b1 == 51 && b2 == 100) return 1;
+  if (b0 == 203 && b1 == 0 && b2 == 113) return 1;
+  if (b0 >= 224) return 1;
+  return 0;
+}
+
+static int IsBlockedSockaddr(const struct sockaddr* sa) {
+  if (!sa) return 1;
+  if (sa->sa_family == AF_INET) {
+    const struct sockaddr_in* sin = (const struct sockaddr_in*)sa;
+    return IsBlockedIpv4Num(ntohl(sin->sin_addr.s_addr));
+  }
+  if (sa->sa_family == AF_INET6) {
+    const struct sockaddr_in6* sin6 = (const struct sockaddr_in6*)sa;
+    const uint8_t* b = sin6->sin6_addr.s6_addr;
+    int allZero = 1;
+    for (int i = 0; i < 15; i++) {
+      if (b[i] != 0) { allZero = 0; break; }
+    }
+    if (allZero && (b[15] == 0 || b[15] == 1)) return 1; /* :: / ::1 */
+    if ((b[0] & 0xFE) == 0xFC) return 1; /* fc00::/7 */
+    if (b[0] == 0xFE && (b[1] & 0xC0) == 0x80) return 1; /* fe80::/10 */
+    if (b[0] == 0xFF) return 1; /* ff00::/8 */
+    /* ::ffff:0:0/96 IPv4-mapped */
+    int v4mapped = 1;
+    for (int i = 0; i < 10; i++) if (b[i] != 0) { v4mapped = 0; break; }
+    if (v4mapped && b[10] == 0xFF && b[11] == 0xFF) {
+      uint32_t v4 = ((uint32_t)b[12] << 24) | ((uint32_t)b[13] << 16) | ((uint32_t)b[14] << 8) | (uint32_t)b[15];
+      return IsBlockedIpv4Num(v4);
+    }
+    return 0;
+  }
+  return 1;
+}
+
 static void HandleMcPing(SOCKET clientSock, const char* reqBody, size_t reqLen) {
   PanJsonValue* body = pan_json_parse(reqBody, reqLen);
   const char* rawAddr = body ? pan_json_str(pan_json_get(body, "address"), "") : "";
@@ -357,15 +441,39 @@ static void HandleMcPing(SOCKET clientSock, const char* reqBody, size_t reqLen) 
   uint16_t port = 25565;
   const char* colon = strchr(trimmed, ':');
   if (colon) {
+    if (strchr(colon + 1, ':') != NULL) {
+      SendJsonResponse(clientSock, 400, "{\"online\":false,\"error\":\"Formato de direcci\\u00f3n inv\\u00e1lido\"}");
+      return;
+    }
     size_t hlen = (size_t)(colon - trimmed);
     if (hlen >= sizeof(host)) hlen = sizeof(host) - 1;
     memcpy(host, trimmed, hlen);
     host[hlen] = '\0';
-    int p = atoi(colon + 1);
-    if (p >= 1 && p <= 65535) port = (uint16_t)p;
+    const char* pstr = colon + 1;
+    if (!pstr[0]) {
+      SendJsonResponse(clientSock, 400, "{\"online\":false,\"error\":\"Puerto inv\\u00e1lido\"}");
+      return;
+    }
+    for (size_t k = 0; pstr[k]; k++) {
+      if (!isdigit((unsigned char)pstr[k])) {
+        SendJsonResponse(clientSock, 400, "{\"online\":false,\"error\":\"Puerto inv\\u00e1lido\"}");
+        return;
+      }
+    }
+    long p = strtol(pstr, NULL, 10);
+    if (p < 1 || p > 65535) {
+      SendJsonResponse(clientSock, 400, "{\"online\":false,\"error\":\"Puerto fuera de rango\"}");
+      return;
+    }
+    port = (uint16_t)p;
   } else {
     strncpy(host, trimmed, sizeof(host) - 1);
     host[sizeof(host) - 1] = '\0';
+  }
+
+  if (!IsSafeHostnameA(host)) {
+    SendJsonResponse(clientSock, 400, "{\"online\":false,\"error\":\"Host inv\\u00e1lido\"}");
+    return;
   }
 
   char escHost[512];
@@ -392,6 +500,23 @@ static void HandleMcPing(SOCKET clientSock, const char* reqBody, size_t reqLen) 
         (unsigned)port);
     SendJsonResponse(clientSock, 200, out);
     return;
+  }
+
+  for (struct addrinfo* cur = res; cur; cur = cur->ai_next) {
+    if (IsBlockedSockaddr(cur->ai_addr)) {
+      freeaddrinfo(res);
+      char out[1024];
+      _snprintf(
+          out,
+          sizeof(out),
+          "{\"online\":false,\"host\":\"%s\",\"port\":%u,\"latencyMs\":null,"
+          "\"playersOnline\":null,\"playersMax\":null,\"versionName\":null,"
+          "\"motd\":null,\"error\":\"Direcci\\u00f3n privada o reservada bloqueada\"}",
+          escHost,
+          (unsigned)port);
+      SendJsonResponse(clientSock, 403, out);
+      return;
+    }
   }
 
   SOCKET mc = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
@@ -866,18 +991,42 @@ static void ServeFileW(SOCKET clientSock, const wchar_t* fullPath, const char* m
   free(buf);
 }
 
+static int UrlDecodePathStrict(const char* src, char* out, size_t cap) {
+  if (!src || !out || cap == 0) return 0;
+  size_t j = 0;
+  for (size_t i = 0; src[i] && j + 1 < cap; i++) {
+    char ch = src[i];
+    if (ch == '%' && isxdigit((unsigned char)src[i + 1]) && isxdigit((unsigned char)src[i + 2])) {
+      char hx[3] = {src[i + 1], src[i + 2], '\0'};
+      unsigned int code = (unsigned int)strtoul(hx, NULL, 16);
+      if (code == 0 || code < 0x20) return 0;
+      ch = (char)code;
+      i += 2;
+    }
+    out[j++] = ch;
+  }
+  out[j] = '\0';
+  return 1;
+}
+
 static void ServeStaticRoute(SOCKET clientSock, const char* relPath) {
+  char decoded[512];
+  if (!UrlDecodePathStrict(relPath ? relPath : "", decoded, sizeof(decoded))) {
+    SendJsonResponse(clientSock, 403, "{\"error\":\"Ruta no permitida\"}");
+    return;
+  }
+
   /* Reject traversal or Windows drive prefixes */
-  if (strstr(relPath, "..") != NULL || strchr(relPath, ':') != NULL) {
+  if (strstr(decoded, "..") != NULL || strchr(decoded, ':') != NULL || decoded[0] == '/' || decoded[0] == '\\') {
     SendJsonResponse(clientSock, 403, "{\"error\":\"Ruta no permitida\"}");
     return;
   }
 
   wchar_t wRel[512];
-  if (relPath[0] == '\0') {
+  if (decoded[0] == '\0') {
     wcscpy(wRel, L"index.html");
   } else {
-    if (MultiByteToWideChar(CP_UTF8, 0, relPath, -1, wRel, 512) <= 0) {
+    if (MultiByteToWideChar(CP_UTF8, 0, decoded, -1, wRel, 512) <= 0) {
       wcscpy(wRel, L"index.html");
     }
     for (int i = 0; wRel[i]; i++) {
@@ -885,21 +1034,30 @@ static void ServeStaticRoute(SOCKET clientSock, const char* relPath) {
     }
   }
 
-  wchar_t fullPath[MAX_PATH];
-  _snwprintf(fullPath, MAX_PATH, L"%ls\\%ls", g_appRoot, wRel);
-  fullPath[MAX_PATH - 1] = L'\0';
+  wchar_t rawFull[MAX_PATH], canonBase[MAX_PATH], fullPath[MAX_PATH];
+  _snwprintf(rawFull, MAX_PATH, L"%ls\\%ls", g_appRoot, wRel);
+  rawFull[MAX_PATH - 1] = L'\0';
+  DWORD bl = GetFullPathNameW(g_appRoot, MAX_PATH, canonBase, NULL);
+  DWORD fl = GetFullPathNameW(rawFull, MAX_PATH, fullPath, NULL);
+  if (bl == 0 || bl >= MAX_PATH || fl == 0 || fl >= MAX_PATH ||
+      _wcsnicmp(fullPath, canonBase, bl) != 0 ||
+      (fullPath[bl] != L'\\' && fullPath[bl] != L'\0')) {
+    SendJsonResponse(clientSock, 403, "{\"error\":\"Ruta no permitida\"}");
+    return;
+  }
 
-  if (!FileExistsW(fullPath)) {
+  int exists = FileExistsW(fullPath);
+  if (!exists) {
     _snwprintf(fullPath, MAX_PATH, L"%ls\\index.html", g_appRoot);
     fullPath[MAX_PATH - 1] = L'\0';
   }
 
   const char* mime = GetMimeType(fullPath);
-  int noStore = StrEndsWithCI(relPath, ".html") || relPath[0] == '\0' || !FileExistsW(fullPath);
+  int noStore = StrEndsWithCI(decoded, ".html") || decoded[0] == '\0' || !exists;
   ServeFileW(clientSock, fullPath, mime, noStore, NULL);
 }
 
-static void SanitizeJarNameA(const char* in, char* out, size_t cap) {
+static void SanitizeExtNameA(const char* in, const char* ext, const char* fallback, char* out, size_t cap) {
   if (!out || cap == 0) return;
   out[0] = '\0';
   if (!in) in = "";
@@ -907,7 +1065,8 @@ static void SanitizeJarNameA(const char* in, char* out, size_t cap) {
   const char* lastBack = strrchr(in, '\\');
   const char* base = lastSlash > lastBack ? lastSlash + 1 : (lastBack ? lastBack + 1 : in);
   size_t j = 0;
-  for (size_t i = 0; base[i] && j + 6 < cap; i++) {
+  size_t extLen = strlen(ext);
+  for (size_t i = 0; base[i] && j + extLen + 2 < cap; i++) {
     unsigned char c = (unsigned char)base[i];
     if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
         c == '.' || c == '_' || c == '-' || c == '+') {
@@ -919,13 +1078,21 @@ static void SanitizeJarNameA(const char* in, char* out, size_t cap) {
   }
   out[j] = '\0';
   if (j == 0) {
-    strncpy(out, "custom-mod.jar", cap - 1);
+    strncpy(out, fallback, cap - 1);
     out[cap - 1] = '\0';
     return;
   }
-  if (!StrEndsWithCI(out, ".jar") && j + 4 < cap) {
-    strcat(out, ".jar");
+  if (!StrEndsWithCI(out, ext) && j + extLen < cap) {
+    strcat(out, ext);
   }
+}
+
+static void SanitizeJarNameA(const char* in, char* out, size_t cap) {
+  SanitizeExtNameA(in, ".jar", "custom-mod.jar", out, cap);
+}
+
+static void SanitizeZipNameA(const char* in, char* out, size_t cap) {
+  SanitizeExtNameA(in, ".zip", "pack.zip", out, cap);
 }
 
 static void ExtractQueryParamDecoded(const char* query, const char* key, char* out, size_t cap) {
@@ -964,6 +1131,17 @@ static void GetCustomModsDirW(wchar_t* outDir, size_t cap) {
   _snwprintf(outDir, cap, L"%ls\\custom-mods", g_panDir);
   outDir[cap - 1] = L'\0';
   CreateDirectoryW(g_panDir, NULL);
+  CreateDirectoryW(outDir, NULL);
+}
+
+static void GetSharedResourcePacksDirW(wchar_t* outDir, size_t cap) {
+  wchar_t sharedRoot[MAX_PATH];
+  _snwprintf(sharedRoot, MAX_PATH, L"%ls\\shared", g_panDir);
+  sharedRoot[MAX_PATH - 1] = L'\0';
+  _snwprintf(outDir, cap, L"%ls\\shared\\resourcepacks", g_panDir);
+  outDir[cap - 1] = L'\0';
+  CreateDirectoryW(g_panDir, NULL);
+  CreateDirectoryW(sharedRoot, NULL);
   CreateDirectoryW(outDir, NULL);
 }
 
@@ -1029,8 +1207,8 @@ static void HandleCustomModsFile(SOCKET clientSock, const char* query) {
 }
 
 static void HandleCustomModsUpload(SOCKET clientSock, const char* query, const char* body, size_t bodyLen) {
-  if (!body || bodyLen == 0) {
-    SendJsonResponse(clientSock, 400, "{\"ok\":false,\"error\":\"Archivo vacío\"}");
+  if (!body || bodyLen < 4 || (unsigned char)body[0] != 0x50 || (unsigned char)body[1] != 0x4B) {
+    SendJsonResponse(clientSock, 400, "{\"ok\":false,\"error\":\"Archivo .jar/.zip no v\\u00e1lido\"}");
     return;
   }
   char rawName[256] = "";
@@ -1097,6 +1275,136 @@ static void HandleCustomModsOpenFolder(SOCKET clientSock) {
   SendJsonResponse(clientSock, 200, "{\"ok\":true}");
 }
 
+static void HandleResourcePacksList(SOCKET clientSock) {
+  wchar_t rpDir[MAX_PATH];
+  GetSharedResourcePacksDirW(rpDir, MAX_PATH);
+
+  char dirUtf8[MAX_PATH * 3] = "";
+  WideCharToMultiByte(CP_UTF8, 0, rpDir, -1, dirUtf8, sizeof(dirUtf8), NULL, NULL);
+  char escDir[MAX_PATH * 3] = "";
+  EscapeJsonStr(dirUtf8, escDir, sizeof(escDir));
+
+  size_t outCap = 131072;
+  char* out = (char*)malloc(outCap);
+  if (!out) {
+    SendJsonResponse(clientSock, 500, "{\"ok\":false,\"error\":\"Sin memoria\"}");
+    return;
+  }
+  size_t pos = (size_t)_snprintf(out, outCap, "{\"ok\":true,\"dir\":\"%s\",\"files\":[", escDir);
+
+  wchar_t pattern[MAX_PATH];
+  _snwprintf(pattern, MAX_PATH, L"%ls\\*.zip", rpDir);
+  pattern[MAX_PATH - 1] = L'\0';
+
+  WIN32_FIND_DATAW fd;
+  HANDLE hFind = FindFirstFileW(pattern, &fd);
+  int count = 0;
+  if (hFind != INVALID_HANDLE_VALUE) {
+    do {
+      if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+      char fnUtf8[512] = "";
+      WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, fnUtf8, sizeof(fnUtf8), NULL, NULL);
+      char escFn[768] = "";
+      EscapeJsonStr(fnUtf8, escFn, sizeof(escFn));
+      ULONGLONG fsize = (((ULONGLONG)fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
+      if (pos + strlen(escFn) + 96 >= outCap) break;
+      pos += (size_t)_snprintf(out + pos, outCap - pos, "%s{\"filename\":\"%s\",\"size\":%llu}",
+                               count > 0 ? "," : "", escFn, (unsigned long long)fsize);
+      count++;
+    } while (FindNextFileW(hFind, &fd));
+    FindClose(hFind);
+  }
+  _snprintf(out + pos, outCap - pos, "]}");
+  SendJsonResponse(clientSock, 200, out);
+  free(out);
+}
+
+static void HandleResourcePacksFile(SOCKET clientSock, const char* query) {
+  char rawName[256] = "";
+  char safeName[256] = "";
+  ExtractQueryParamDecoded(query, "filename", rawName, sizeof(rawName));
+  if (!rawName[0]) {
+    SendJsonResponse(clientSock, 400, "{\"ok\":false,\"error\":\"Nombre requerido\"}");
+    return;
+  }
+  SanitizeZipNameA(rawName, safeName, sizeof(safeName));
+  wchar_t rpDir[MAX_PATH], wName[256], fullPath[MAX_PATH];
+  GetSharedResourcePacksDirW(rpDir, MAX_PATH);
+  MultiByteToWideChar(CP_UTF8, 0, safeName, -1, wName, 256);
+  _snwprintf(fullPath, MAX_PATH, L"%ls\\%ls", rpDir, wName);
+  fullPath[MAX_PATH - 1] = L'\0';
+  ServeFileW(clientSock, fullPath, "application/zip", 1, NULL);
+}
+
+static void HandleResourcePacksUpload(SOCKET clientSock, const char* query, const char* body, size_t bodyLen) {
+  if (!body || bodyLen < 4 || (unsigned char)body[0] != 0x50 || (unsigned char)body[1] != 0x4B) {
+    SendJsonResponse(clientSock, 400, "{\"ok\":false,\"error\":\"Archivo .zip no v\\u00e1lido\"}");
+    return;
+  }
+  char rawName[256] = "";
+  char safeName[256] = "";
+  ExtractQueryParamDecoded(query, "filename", rawName, sizeof(rawName));
+  SanitizeZipNameA(rawName[0] ? rawName : "pack.zip", safeName, sizeof(safeName));
+
+  wchar_t rpDir[MAX_PATH], wName[256], fullPath[MAX_PATH];
+  GetSharedResourcePacksDirW(rpDir, MAX_PATH);
+  MultiByteToWideChar(CP_UTF8, 0, safeName, -1, wName, 256);
+  _snwprintf(fullPath, MAX_PATH, L"%ls\\%ls", rpDir, wName);
+  fullPath[MAX_PATH - 1] = L'\0';
+
+  HANDLE hFile = CreateFileW(fullPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (hFile == INVALID_HANDLE_VALUE) {
+    SendJsonResponse(clientSock, 500, "{\"ok\":false,\"error\":\"No se pudo guardar el resource pack\"}");
+    return;
+  }
+  size_t written = 0;
+  int ok = 1;
+  while (written < bodyLen) {
+    DWORD chunk = (bodyLen - written) > 65536 ? 65536 : (DWORD)(bodyLen - written);
+    DWORD wr = 0;
+    if (!WriteFile(hFile, body + written, chunk, &wr, NULL) || wr == 0) {
+      ok = 0;
+      break;
+    }
+    written += wr;
+  }
+  CloseHandle(hFile);
+  if (!ok) {
+    DeleteFileW(fullPath);
+    SendJsonResponse(clientSock, 500, "{\"ok\":false,\"error\":\"Escritura incompleta del resource pack\"}");
+    return;
+  }
+  char escFn[512] = "";
+  EscapeJsonStr(safeName, escFn, sizeof(escFn));
+  char resp[700];
+  _snprintf(resp, sizeof(resp), "{\"ok\":true,\"filename\":\"%s\",\"size\":%llu}", escFn, (unsigned long long)bodyLen);
+  SendJsonResponse(clientSock, 200, resp);
+}
+
+static void HandleResourcePacksDelete(SOCKET clientSock, const char* body, size_t bodyLen) {
+  PanJsonValue* req = body && bodyLen > 0 ? pan_json_parse(body, bodyLen) : NULL;
+  const char* fn = req ? pan_json_str(pan_json_get(req, "filename"), "") : "";
+  if (fn && fn[0]) {
+    char safeName[256] = "";
+    SanitizeZipNameA(fn, safeName, sizeof(safeName));
+    wchar_t rpDir[MAX_PATH], wName[256], fullPath[MAX_PATH];
+    GetSharedResourcePacksDirW(rpDir, MAX_PATH);
+    MultiByteToWideChar(CP_UTF8, 0, safeName, -1, wName, 256);
+    _snwprintf(fullPath, MAX_PATH, L"%ls\\%ls", rpDir, wName);
+    fullPath[MAX_PATH - 1] = L'\0';
+    DeleteFileW(fullPath);
+  }
+  pan_json_free(req);
+  SendJsonResponse(clientSock, 200, "{\"ok\":true}");
+}
+
+static void HandleResourcePacksOpenFolder(SOCKET clientSock) {
+  wchar_t rpDir[MAX_PATH];
+  GetSharedResourcePacksDirW(rpDir, MAX_PATH);
+  ShellExecuteW(NULL, L"open", rpDir, NULL, NULL, SW_SHOWNORMAL);
+  SendJsonResponse(clientSock, 200, "{\"ok\":true}");
+}
+
 /* =========================================================================
  * Multi-Threaded HTTP Request Worker
  * ========================================================================= */
@@ -1139,20 +1447,68 @@ static DWORD WINAPI HttpClientThread(LPVOID param) {
     return 0;
   }
 
+  t_corsOrigin[0] = '\0';
   size_t hdrLen = (size_t)(hdrEnd - buf) + 4;
   size_t contentLength = 0;
+  int clInvalid = 0;
+  int clTooBig = 0;
 
-  /* Parse Content-Length case-insensitively */
+  /* Parse Content-Length and Origin case-insensitively */
   for (const char* p = buf; p < hdrEnd; ) {
     const char* lineEnd = strstr(p, "\r\n");
     if (!lineEnd || lineEnd > hdrEnd) break;
     if ((size_t)(lineEnd - p) > 15 && StrStartsWithCI(p, "Content-Length:")) {
       const char* val = p + 15;
       while (val < lineEnd && (*val == ' ' || *val == '\t')) val++;
-      long cl = atol(val);
-      if (cl > 0 && cl <= 64L * 1024L * 1024L) contentLength = (size_t)cl;
+      if (val >= lineEnd) {
+        clInvalid = 1;
+      } else {
+        uint64_t parsed = 0;
+        for (const char* q = val; q < lineEnd && *q != ' ' && *q != '\t'; q++) {
+          if (!isdigit((unsigned char)*q)) {
+            clInvalid = 1;
+            break;
+          }
+          parsed = parsed * 10ULL + (uint64_t)(*q - '0');
+          if (parsed > 64ULL * 1024ULL * 1024ULL) {
+            clTooBig = 1;
+            break;
+          }
+        }
+        if (!clInvalid && !clTooBig) contentLength = (size_t)parsed;
+      }
+    } else if ((size_t)(lineEnd - p) > 7 && StrStartsWithCI(p, "Origin:")) {
+      const char* val = p + 7;
+      while (val < lineEnd && (*val == ' ' || *val == '\t')) val++;
+      size_t olen = (size_t)(lineEnd - val);
+      while (olen > 0 && (val[olen - 1] == ' ' || val[olen - 1] == '\t')) olen--;
+      if (olen >= sizeof(t_corsOrigin)) olen = sizeof(t_corsOrigin) - 1;
+      memcpy(t_corsOrigin, val, olen);
+      t_corsOrigin[olen] = '\0';
     }
     p = lineEnd + 2;
+  }
+
+  if (t_corsOrigin[0] && !IsLoopbackOriginA(t_corsOrigin)) {
+    SendJsonResponse(s, 403, "{\"ok\":false,\"error\":\"Origen no permitido\"}");
+    free(buf);
+    shutdown(s, SD_BOTH);
+    closesocket(s);
+    return 0;
+  }
+  if (clTooBig) {
+    SendJsonResponse(s, 413, "{\"ok\":false,\"error\":\"Cuerpo demasiado grande\"}");
+    free(buf);
+    shutdown(s, SD_BOTH);
+    closesocket(s);
+    return 0;
+  }
+  if (clInvalid) {
+    SendJsonResponse(s, 400, "{\"ok\":false,\"error\":\"Content-Length inv\\u00e1lido\"}");
+    free(buf);
+    shutdown(s, SD_BOTH);
+    closesocket(s);
+    return 0;
   }
 
   if (contentLength > 65536) {
@@ -1164,14 +1520,16 @@ static DWORD WINAPI HttpClientThread(LPVOID param) {
   size_t neededTotal = hdrLen + contentLength;
   if (neededTotal > cap - 1) {
     char* nb = (char*)realloc(buf, neededTotal + 1);
-    if (nb) {
-      buf = nb;
-      cap = neededTotal + 1;
-      hdrEnd = buf + hdrLen - 4;
-    } else {
-      contentLength = 0;
-      neededTotal = hdrLen;
+    if (!nb) {
+      SendJsonResponse(s, 500, "{\"ok\":false,\"error\":\"Sin memoria\"}");
+      free(buf);
+      shutdown(s, SD_BOTH);
+      closesocket(s);
+      return 0;
     }
+    buf = nb;
+    cap = neededTotal + 1;
+    hdrEnd = buf + hdrLen - 4;
   }
   while (len < neededTotal) {
     size_t want = neededTotal - len;
@@ -1247,6 +1605,16 @@ static DWORD WINAPI HttpClientThread(LPVOID param) {
     HandleCustomModsDelete(s, bodyPtr, bodyLen);
   } else if (strcmp(rel, "api/local/mods/open-folder") == 0 && _stricmp(method, "POST") == 0) {
     HandleCustomModsOpenFolder(s);
+  } else if (strcmp(rel, "api/local/resourcepacks") == 0 && _stricmp(method, "GET") == 0) {
+    HandleResourcePacksList(s);
+  } else if (strcmp(rel, "api/local/resourcepacks/file") == 0 && _stricmp(method, "GET") == 0) {
+    HandleResourcePacksFile(s, queryStr);
+  } else if (strcmp(rel, "api/local/resourcepacks/upload") == 0 && _stricmp(method, "POST") == 0) {
+    HandleResourcePacksUpload(s, queryStr, bodyPtr, bodyLen);
+  } else if (strcmp(rel, "api/local/resourcepacks/delete") == 0 && _stricmp(method, "POST") == 0) {
+    HandleResourcePacksDelete(s, bodyPtr, bodyLen);
+  } else if (strcmp(rel, "api/local/resourcepacks/open-folder") == 0 && _stricmp(method, "POST") == 0) {
+    HandleResourcePacksOpenFolder(s);
   } else if (strcmp(rel, "api/local/launch") == 0 && _stricmp(method, "POST") == 0) {
     if (bodyLen == 0) {
       SendJsonResponse(s, 400, "{\"ok\":false,\"error\":\"Falta configuraci\\u00f3n de lanzamiento\"}");

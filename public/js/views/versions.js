@@ -6,12 +6,19 @@
 
   Nexus.views = Nexus.views || {};
 
-  const TYPE_LABELS = Object.freeze({
-    release: 'Oficial',
-    snapshot: 'Snapshot',
-    old_beta: 'Beta',
-    old_alpha: 'Alpha'
-  });
+  function t(key, vars, fallback) {
+    if (Nexus.i18n && typeof Nexus.i18n.t === 'function') {
+      const val = Nexus.i18n.t(key, vars);
+      if (val !== key || fallback === undefined) return val;
+    }
+    return fallback !== undefined ? fallback : key;
+  }
+
+  function typeLabel(type) {
+    const known = ['release', 'snapshot', 'old_beta', 'old_alpha'];
+    if (known.includes(type)) return t(`versions.type.${type}`);
+    return type;
+  }
 
   function typeBadgeClass(type) {
     if (type === 'release') return 'badge-release';
@@ -33,18 +40,18 @@
         <div class="install-progress-head">
           <div>
             <strong>${escapeHtml(progress.versionId)}</strong>
-            <span class="install-phase">${escapeHtml(progress.phaseLabel || 'Procesando')}</span>
+            <span class="install-phase">${escapeHtml(progress.phaseLabel || t('versions.progressProcessing'))}</span>
           </div>
           ${active
-            ? `<button type="button" class="btn btn-xs btn-danger" data-action="cancel-install" data-version-id="${escapeHtml(progress.versionId)}">Cancelar</button>`
+            ? `<button type="button" class="btn btn-xs btn-danger" data-action="cancel-install" data-version-id="${escapeHtml(progress.versionId)}">${escapeHtml(t('versions.cancel'))}</button>`
             : `<span class="badge ${isError ? 'badge-error' : 'badge-installed'}">${escapeHtml(pct)}%</span>`}
         </div>
         <progress class="progress-track" max="100" value="${pct}"></progress>
         <div class="install-progress-stats">
-          <span>Progreso: ${escapeHtml(String(pct))}%</span>
-          ${progress.filesTotal ? `<span>Archivos: ${escapeHtml(String(progress.filesDone || 0))} / ${escapeHtml(String(progress.filesTotal))}</span>` : ''}
-          ${progress.total ? `<span>Descarga: ${escapeHtml(formatBytes(progress.downloaded))} / ${escapeHtml(formatBytes(progress.total))}</span>` : ''}
-          ${progress.speed ? `<span>Velocidad: ${escapeHtml(formatBytes(progress.speed))}/s</span>` : ''}
+          <span>${escapeHtml(t('versions.progressPct', { pct }))}</span>
+          ${progress.filesTotal ? `<span>${escapeHtml(t('versions.progressFiles', { done: progress.filesDone || 0, total: progress.filesTotal }))}</span>` : ''}
+          ${progress.total ? `<span>${escapeHtml(t('versions.progressDownload', { down: formatBytes(progress.downloaded), total: formatBytes(progress.total) }))}</span>` : ''}
+          ${progress.speed ? `<span>${escapeHtml(t('versions.progressSpeed', { speed: formatBytes(progress.speed) }))}</span>` : ''}
         </div>
         ${progress.message ? `<p class="install-message">${escapeHtml(progress.message)}</p>` : ''}
       </section>`;
@@ -79,16 +86,16 @@
     const visible = all.slice(0, limit);
 
     if (state.versionsLoading && !(state.versions || []).length) {
-      return '<div class="empty-state"><span class="empty-icon" data-icon="refresh"></span><h3>Cargando catálogo oficial…</h3><p>Consultando Mojang Piston Meta v2.</p></div>';
+      return `<div class="empty-state"><span class="empty-icon" data-icon="refresh"></span><h3>${escapeHtml(t('versions.loadingTitle'))}</h3><p>${escapeHtml(t('versions.loadingSub'))}</p></div>`;
     }
 
     if (!visible.length) {
       return `
         <div class="empty-state">
           <span class="empty-icon" data-icon="search"></span>
-          <h3>Sin resultados</h3>
-          <p>Ninguna versión coincide con el filtro actual.</p>
-          <button type="button" class="btn btn-sm" data-action="reset-filters">Restablecer filtros</button>
+          <h3>${escapeHtml(t('versions.emptyTitle'))}</h3>
+          <p>${escapeHtml(t('versions.emptySub'))}</p>
+          <button type="button" class="btn btn-sm" data-action="reset-filters">${escapeHtml(t('versions.resetFilters'))}</button>
         </div>`;
     }
 
@@ -101,11 +108,11 @@
       return `
         <article class="version-card${isSelected ? ' selected' : ''}${isInstalling ? ' installing' : ''}">
           <div class="version-card-top">
-            <span class="badge ${typeBadgeClass(ver.type)}">${escapeHtml(TYPE_LABELS[ver.type] || ver.type)}</span>
+            <span class="badge ${typeBadgeClass(ver.type)}">${escapeHtml(typeLabel(ver.type))}</span>
             ${isInstalled
-              ? '<span class="badge badge-installed">Instalada</span>'
+              ? `<span class="badge badge-installed">${escapeHtml(t('versions.badgeInstalled'))}</span>`
               : ver.latestRelease
-                ? '<span class="badge badge-latest">Última</span>'
+                ? `<span class="badge badge-latest">${escapeHtml(t('versions.badgeLatest'))}</span>`
                 : `<span class="badge">Java ${reqJava}</span>`}
           </div>
           <div class="version-card-title tabular">${escapeHtml(ver.id)}</div>
@@ -113,15 +120,15 @@
             <span>${escapeHtml(formatDate(ver.released))}</span>
             <span>Java ${reqJava}+</span>
           </div>
-          <div class="version-actions" style="display:flex;">
+          <div class="version-actions">
             <button type="button" class="btn btn-sm ${isSelected ? 'btn-primary' : ''}"
                     data-action="select-version" data-version-id="${escapeHtml(ver.id)}">
-              ${isSelected ? 'Activa' : 'Elegir'}
+              ${escapeHtml(isSelected ? t('versions.active') : t('versions.choose'))}
             </button>
             ${isInstalling
-              ? `<button type="button" class="btn btn-sm btn-danger" data-action="cancel-install" data-version-id="${escapeHtml(ver.id)}">Cancelar</button>`
+              ? `<button type="button" class="btn btn-sm btn-danger" data-action="cancel-install" data-version-id="${escapeHtml(ver.id)}">${escapeHtml(t('versions.cancel'))}</button>`
               : `<button type="button" class="btn btn-sm" data-action="install-version" data-version-id="${escapeHtml(ver.id)}" ${activeInstall ? 'disabled' : ''}>
-                  ${isInstalled ? 'Verificar' : 'Instalar'}
+                  ${escapeHtml(isInstalled ? t('versions.verify') : t('versions.install'))}
                 </button>`}
           </div>
         </article>`;
@@ -132,7 +139,7 @@
       ${all.length > visible.length ? `
         <div class="load-more">
           <button type="button" class="btn btn-sm" data-action="show-more-versions">
-            Mostrar más (${escapeHtml(String(visible.length))} / ${escapeHtml(String(all.length))})
+            ${escapeHtml(t('versions.showMore', { visible: visible.length, total: all.length }))}
           </button>
         </div>` : ''}`;
   };
@@ -140,22 +147,22 @@
   Nexus.views.versions = function (state) {
     const ui = state.ui || { search: '', filter: 'all', sort: 'newest' };
     const filters = [
-      { id: 'all', label: 'Todas' },
-      { id: 'release', label: 'Oficiales' },
-      { id: 'snapshot', label: 'Snapshots' },
-      { id: 'beta', label: 'Beta' },
-      { id: 'alpha', label: 'Alpha' },
-      { id: 'installed', label: 'Instaladas' }
+      { id: 'all', label: t('versions.filter.all') },
+      { id: 'release', label: t('versions.filter.release') },
+      { id: 'snapshot', label: t('versions.filter.snapshot') },
+      { id: 'beta', label: t('versions.filter.beta') },
+      { id: 'alpha', label: t('versions.filter.alpha') },
+      { id: 'installed', label: t('versions.filter.installed') }
     ];
 
     return `
       <div class="page">
         ${pageHead(
-          'CATÁLOGO MOJANG',
-          'Versiones de Minecraft',
-          'Descarga versiones oficiales desde Piston Meta v2, incluidas las ediciones 26.x con Java 25 y clásicos 1.8.9–1.21.x.',
+          t('versions.eyebrow'),
+          t('versions.title'),
+          t('versions.sub'),
           `<button type="button" class="btn btn-sm" data-action="versions-refresh" ${state.versionsLoading ? 'disabled' : ''}>
-             <span data-icon="refresh"></span> ${state.versionsLoading ? 'Actualizando…' : 'Actualizar lista'}
+             <span data-icon="refresh"></span> ${escapeHtml(state.versionsLoading ? t('versions.updating') : t('versions.refreshBtn'))}
            </button>`
         )}
 
@@ -168,24 +175,24 @@
         <div class="toolbar">
           <div class="search-box">
             <span data-icon="search"></span>
-            <label class="sr-only" for="version-search">Buscar versión</label>
-            <input type="text" id="version-search" placeholder="Buscar versión (ej. 26.3, 1.21.4, 1.8.9)..." value="${escapeHtml(ui.search)}">
+            <label class="sr-only" for="version-search">${escapeHtml(t('versions.searchAria'))}</label>
+            <input type="text" id="version-search" placeholder="${escapeHtml(t('versions.searchPh'))}" value="${escapeHtml(ui.search)}">
           </div>
-          <div class="filter-group" role="group" aria-label="Filtros de versión">
+          <div class="filter-group" role="group" aria-label="${escapeHtml(t('versions.filtersAria'))}">
             ${filters.map((f) => `
               <button type="button" class="filter-chip${ui.filter === f.id ? ' active' : ''}"
                       data-action="filter" data-filter="${f.id}">${escapeHtml(f.label)}</button>`).join('')}
           </div>
           <div class="filter-group">
-            <button type="button" class="filter-chip${ui.sort === 'newest' ? ' active' : ''}" data-action="sort" data-sort="newest">Recientes</button>
-            <button type="button" class="filter-chip${ui.sort === 'oldest' ? ' active' : ''}" data-action="sort" data-sort="oldest">Antiguas</button>
+            <button type="button" class="filter-chip${ui.sort === 'newest' ? ' active' : ''}" data-action="sort" data-sort="newest">${escapeHtml(t('versions.sort.newest'))}</button>
+            <button type="button" class="filter-chip${ui.sort === 'oldest' ? ' active' : ''}" data-action="sort" data-sort="oldest">${escapeHtml(t('versions.sort.oldest'))}</button>
           </div>
         </div>
 
         <div class="catalog-status">
-          <span><strong>Total:</strong> ${escapeHtml(String((state.versions || []).length))} versiones</span>
-          <span><strong>Instaladas:</strong> ${escapeHtml(String((state.installed || []).length))}</span>
-          <span><strong>Fuente:</strong> ${state.versionsStale ? 'Caché local' : 'Mojang Oficial'}</span>
+          <span><strong>${escapeHtml(t('versions.total'))}</strong> ${escapeHtml(t('versions.totalCount', { count: (state.versions || []).length }))}</span>
+          <span><strong>${escapeHtml(t('versions.installedLabel'))}</strong> ${escapeHtml(String((state.installed || []).length))}</span>
+          <span><strong>${escapeHtml(t('versions.sourceLabel'))}</strong> ${escapeHtml(state.versionsStale ? t('versions.sourceCache') : t('versions.sourceOfficial'))}</span>
         </div>
 
         <div id="version-grid">${Nexus.views.versionGrid(state)}</div>

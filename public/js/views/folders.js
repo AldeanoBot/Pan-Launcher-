@@ -6,6 +6,14 @@
 
   Nexus.views = Nexus.views || {};
 
+  function t(key, vars, fallback) {
+    if (Nexus.i18n && typeof Nexus.i18n.t === 'function') {
+      const val = Nexus.i18n.t(key, vars);
+      if (val !== key || fallback === undefined) return val;
+    }
+    return fallback !== undefined ? fallback : key;
+  }
+
   Nexus.views.folderGrid = function (state) {
     const folders = state.folders || {};
     if (folders.error) {
@@ -16,9 +24,9 @@
       return `
         <div class="empty-state">
           <span class="empty-icon" data-icon="folder"></span>
-          <h3>Selecciona una instalación</h3>
-          <p>Crea o selecciona una instalación para inspeccionar sus carpetas de mods, mundos, texturas y logs.</p>
-          <button type="button" class="btn btn-sm" data-action="navigate" data-view="installations">Ir a Instalaciones</button>
+          <h3>${escapeHtml(t('folders.emptyTitle'))}</h3>
+          <p>${escapeHtml(t('folders.emptySub'))}</p>
+          <button type="button" class="btn btn-sm" data-action="navigate" data-view="installations">${escapeHtml(t('folders.goInst'))}</button>
         </div>`;
     }
 
@@ -34,9 +42,9 @@
             </div>
             <div class="folder-actions" style="margin-top:0;">
               <button type="button" class="btn btn-xs" data-action="folders-copy" data-key="${escapeHtml(item.key)}">
-                <span data-icon="copy"></span> Copiar ruta
+                <span data-icon="copy"></span> ${escapeHtml(t('folders.copyPath'))}
               </button>
-              <button type="button" class="btn btn-xs" data-action="folders-open" data-key="${escapeHtml(item.key)}">Abrir</button>
+              <button type="button" class="btn btn-xs" data-action="folders-open" data-key="${escapeHtml(item.key)}">${escapeHtml(t('folders.openBtn'))}</button>
             </div>
           </div>`).join('')}
       </div>`;
@@ -49,24 +57,24 @@
     return `
       <div class="page">
         ${pageHead(
-          'SISTEMA DE ARCHIVOS',
-          'Carpetas de la instalación',
-          'Accede rápido a mods, mundos, packs de recursos, shaders y registros de la instalación seleccionada.',
+          t('folders.eyebrow'),
+          t('folders.title'),
+          t('folders.sub'),
           `<div class="header-actions">
-             <button type="button" class="btn btn-sm" data-action="navigate" data-view="installations">Volver a Instalaciones</button>
+             <button type="button" class="btn btn-sm" data-action="navigate" data-view="installations">${escapeHtml(t('folders.back'))}</button>
              <button type="button" class="btn btn-sm" data-action="folders-refresh">
-               <span data-icon="refresh"></span> Refrescar
+               <span data-icon="refresh"></span> ${escapeHtml(t('folders.refresh'))}
              </button>
            </div>`
         )}
 
         <section class="panel">
           <div class="field" style="max-width:420px;margin-bottom:16px;">
-            <label for="folders-installation">Instalación seleccionada</label>
+            <label for="folders-installation">${escapeHtml(t('folders.selectedInst'))}</label>
             <select id="folders-installation" ${!list.length ? 'disabled' : ''}>
               ${list.length
                 ? list.map((inst) => `<option value="${escapeHtml(inst.id)}"${inst.id === selectedId ? ' selected' : ''}>${escapeHtml(inst.name)} (${escapeHtml(inst.versionId)})</option>`).join('')
-                : '<option value="">Sin instalaciones creadas</option>'}
+                : `<option value="">${escapeHtml(t('folders.noInsts'))}</option>`}
             </select>
           </div>
           <div id="folder-grid">${Nexus.views.folderGrid(state)}</div>

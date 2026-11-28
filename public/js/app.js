@@ -2,7 +2,15 @@
   'use strict';
 
   const Nexus = (window.Nexus = window.Nexus || {});
-  const { escapeHtml, formatRam, hydrateIcons, toast } = Nexus.utils;
+  const { escapeHtml, formatRam, hydrateIcons, toast, confirmModal } = Nexus.utils;
+
+  function t(key, vars, fallback) {
+    if (Nexus.i18n && typeof Nexus.i18n.t === 'function') {
+      const translated = Nexus.i18n.t(key, vars);
+      if (translated !== key || !fallback) return translated;
+    }
+    return String(fallback || key);
+  }
 
   let root = null;
   let searchTimer = null;
@@ -95,11 +103,15 @@
     if (!current) return;
     const auth = current.auth || {};
     const sessionState = current.session || { mode: 'online', profile: null };
-    const mode = sessionState.mode === 'offline' ? 'Offline' : 'Online';
+    const mode = sessionState.mode === 'offline'
+      ? t('home.offlineLabel', null, 'Offline')
+      : t('home.onlineLabel', null, 'Online');
     const profile = sessionState.profile || auth.profile;
     const accountLabel = profile
       ? `${profile.name} · ${mode}`
-      : auth.canRestore ? `Sesión guardada · ${mode}` : `Sin sesión · ${mode}`;
+      : auth.canRestore
+        ? `${t('shell.savedSession', null, 'Sesión guardada')} · ${mode}`
+        : `${t('shell.noSession', null, 'Sin sesión')} · ${mode}`;
 
     setChip('version-chip', 'cube', currentVersionId());
     setChip('account-chip', profile ? 'check' : 'user', accountLabel);
@@ -108,7 +120,9 @@
     if (systemStatus) {
       const label = profile
         ? `${mode}: ${profile.name}`
-        : auth.canRestore ? `Sesión guardada · ${mode}` : 'Sistema listo';
+        : auth.canRestore
+          ? `${t('shell.savedSession', null, 'Sesión guardada')} · ${mode}`
+          : t('shell.systemReady', null, 'Sistema listo');
       systemStatus.innerHTML = `<span class="status-dot"></span> ${escapeHtml(label)}`;
     }
 
@@ -321,7 +335,7 @@
       installationId: result.installationId,
       versionId: result.versionId,
       phase: result.ok ? 'done' : result.cancelled ? 'cancelled' : 'error',
-      phaseLabel: result.ok ? 'Instalación completada' : result.cancelled ? 'Instalación cancelada' : 'Error en la instalación',
+      phaseLabel: result.ok ? t('install.doneLabel') : result.cancelled ? t('install.cancelledLabel') : t('install.errorLabel'),
       percent: result.ok ? 100 : 0,
       filesDone: 0,
       filesTotal: 0,
@@ -337,7 +351,7 @@
     return {
       versionId: result.versionId,
       phase,
-      phaseLabel: result.ok ? 'Instalación completada' : result.cancelled ? 'Instalación cancelada' : 'Error en la instalación',
+      phaseLabel: result.ok ? t('install.doneLabel') : result.cancelled ? t('install.cancelledLabel') : t('install.errorLabel'),
       file: '',
       downloaded: 0,
       total: 0,
@@ -346,7 +360,7 @@
       eta: 0,
       filesDone: result.ok ? result.fileCount || 0 : 0,
       filesTotal: result.fileCount || 0,
-      message: result.ok ? 'Versión instalada y verificada.' : result.error || ''
+      message: result.ok ? t('install.verifiedMsg') : result.error || ''
     };
   }
 
@@ -392,7 +406,7 @@
     return {
       versionId: result.versionId,
       phase: result.ok ? 'done' : result.cancelled ? 'cancelled' : 'error',
-      phaseLabel: result.ok ? 'Perfil instalado y verificado' : result.cancelled ? 'Instalación cancelada' : 'Error en la instalación',
+      phaseLabel: result.ok ? t('install.profileDoneLabel') : result.cancelled ? t('install.cancelledLabel') : t('install.errorLabel'),
       file: '',
       downloaded: 0,
       total: 0,
@@ -470,7 +484,9 @@
       if (dl.loader !== loader || dl.gameVersion !== gv) return;
       dl.items = Array.isArray(res && res.items) ? res.items : [];
       dl.stale = Boolean(res && res.stale);
-      dl.error = dl.items.length ? '' : (res && res.warning ? res.warning : `Sin builds oficiales de ${DIRECT_LOADER_LABELS[loader] || loader} para ${gv}.`);
+      dl.error = dl.items.length
+        ? ''
+        : (res && res.warning ? res.warning : t('install.noOfficialBuilds', { loader: DIRECT_LOADER_LABELS[loader] || loader, mc: gv }));
       dl.state = 'ready';
     } catch (error) {
       if (dl.loader !== loader || dl.gameVersion !== gv) return;
@@ -505,7 +521,7 @@
 
     if (!base) {
       loaders.versionState = 'error';
-      loaders.versionError = 'Instala primero una versión vanilla verificada.';
+      loaders.versionError = t('install.vanillaFirst');
       refresh();
       return;
     }
@@ -518,7 +534,7 @@
       loaders.versionSource = catalog.source;
       loaders.versionStale = Boolean(catalog.stale);
       loaders.versionError = catalog.stale
-        ? (catalog.warning || 'Catálogo en caché: no se pudo verificar con el servidor oficial.')
+        ? (catalog.warning || t('install.cacheWarn'))
         : '';
       loaders.versionState = 'ready';
       loaders.selected = loaders.versions.length ? loaders.versions[0].id : '';
@@ -554,12 +570,12 @@
         if (progress.phase === 'done') {
           if (!belongsToInstallation) {
             applyConfig({ launch: { versionId: progress.versionId, activeInstallationId: null } },
-              `Perfil ${progress.versionId} instalado y seleccionado.`);
+              t('msg.profileInstalledSelected', { id: progress.versionId }));
           }
         } else if (progress.phase === 'cancelled') {
-          toast('Instalación de loader cancelada.');
+          toast(t('msg.loaderCancelled'));
         } else {
-          toast(progress.message || 'No se pudo instalar el perfil.', 'error');
+          toast(progress.message || t('msg.loaderInstallFail'), 'error');
         }
         refreshLoaderStatus().catch(() => {});
       }
@@ -580,11 +596,9 @@
   }
 
   function statusLabel(value) {
-    const labels = {
-      idle: 'Listo', preparing: 'Preparando', starting: 'Iniciando',
-      playing: 'Jugando', stopping: 'Cerrando', error: 'Error'
-    };
-    return labels[value] || 'Listo';
+    const known = ['idle', 'preparing', 'starting', 'playing', 'stopping', 'error'];
+    const key = known.includes(value) ? `status.${value}` : 'status.idle';
+    return t(key, null, 'Listo');
   }
 
   async function refreshLaunchPreflight() {
@@ -655,7 +669,7 @@
   }
 
   function publicErrorMessage(error) {
-    return String((error && error.message) || error || 'Error desconocido.')
+    return String((error && error.message) || error || t('msg.unknownErr'))
       .replace(/^Error occurred in handler for '[^']+':\s*/, '')
       .replace(/^Error invoking remote method '[^']+':\s*/, '')
       .replace(/^Error:\s*/, '');
@@ -713,7 +727,7 @@
       form.catalogSource = catalog.source;
       form.catalogStale = Boolean(catalog.stale);
       form.catalogWarning = catalog.stale || catalog.warning
-        ? (catalog.warning || 'Catálogo en caché por falta de conexión.')
+        ? (catalog.warning || t('install.cacheWarn'))
         : '';
       form.catalogState = 'ready';
       if (form.catalog.length && !form.catalog.some((item) => item.id === form.loaderVersion)) {
@@ -747,12 +761,12 @@
       if (Nexus.router.current === 'newInstall') refreshNewInstallPanel();
       if (terminal) {
         if (progress.phase === 'done') {
-          refreshInstallationStatus(`Instalación "${progress.installationId}" completada.`);
+          refreshInstallationStatus(t('install.instDoneMsg', { id: progress.installationId }));
         } else if (progress.phase === 'cancelled') {
-          refreshInstallationStatus('Instalación cancelada.');
+          refreshInstallationStatus(t('install.instCancelledMsg'));
         } else {
           refreshInstallationStatus();
-          toast(progress.message || 'No se pudo completar la instalación.', 'error');
+          toast(progress.message || t('install.instFailMsg'), 'error');
         }
       }
     }));
@@ -779,12 +793,56 @@
     };
   }
 
+  function warnCompatibilityOnTargetChange(current) {
+    const s = current || state();
+    if (!s) return;
+    const profile = resolveLaunchProfileForMods(s);
+    const loaderLabel = DIRECT_LOADER_LABELS[profile.loader] || profile.loader;
+    const modsList = (s.customMods && s.customMods.items) || [];
+    const rpList = (s.resourcePacks && s.resourcePacks.items) || [];
+
+    const incompatMods = Nexus.modInspector
+      ? Nexus.modInspector.findIncompatibleEnabledMods(modsList, profile.gameVersion, profile.loader)
+      : [];
+    const incompatPacks = Nexus.resourcePackInspector
+      ? Nexus.resourcePackInspector.findIncompatibleEnabledPacks(rpList, profile.gameVersion)
+      : [];
+
+    if (incompatMods.length > 0) {
+      const names = incompatMods.slice(0, 2).map((e) => e.mod.name || e.mod.filename).join(', ')
+        + (incompatMods.length > 2 ? ` (+${incompatMods.length - 2})` : '');
+      toast(t('msg.switchIncompatMods', {
+        mc: profile.gameVersion,
+        loader: loaderLabel,
+        count: incompatMods.length,
+        names
+      }), 'error');
+    }
+    if (incompatPacks.length > 0) {
+      const names = incompatPacks.slice(0, 2).map((e) => e.pack.name || e.pack.filename).join(', ')
+        + (incompatPacks.length > 2 ? ` (+${incompatPacks.length - 2})` : '');
+      toast(t('msg.switchIncompatPacks', {
+        mc: profile.gameVersion,
+        count: incompatPacks.length,
+        names
+      }), 'error');
+    }
+  }
+
   async function refreshCustomMods() {
     const current = state();
     if (!current || !Nexus.api.mods) return;
     const items = await Nexus.api.mods.list();
     current.customMods.items = Array.isArray(items) ? items : [];
     if (Nexus.router.current === 'mods') refresh();
+  }
+
+  async function refreshResourcePacks() {
+    const current = state();
+    if (!current || !Nexus.api.resourcePacks) return;
+    const items = await Nexus.api.resourcePacks.list();
+    current.resourcePacks.items = Array.isArray(items) ? items : [];
+    if (Nexus.router.current === 'resourcepacks') refresh();
   }
 
   async function handleCustomModFiles(fileList) {
@@ -801,9 +859,11 @@
           ? Nexus.modInspector.findIncompatibleEnabledMods(current.customMods.items, profile.gameVersion, profile.loader)
           : [];
         if (incompat.length > 0) {
-          toast(`${result.added} ${result.added === 1 ? 'mod añadido' : 'mods añadidos'}. Aviso: ${incompat.length} incompatible con ${profile.gameVersion}.`, 'error');
+          toast(t('msg.modsAddedIncompat', { count: result.added, incompat: incompat.length, mc: profile.gameVersion }), 'error');
         } else {
-          toast(`${result.added} ${result.added === 1 ? 'mod añadido y listo para jugar.' : 'mods añadidos y listos para jugar.'}`);
+          toast(result.added === 1
+            ? t('msg.modsAddedOk', { count: result.added })
+            : t('msg.modsAddedPluralOk', { count: result.added }));
         }
       }
       if (Array.isArray(result.errors) && result.errors.length > 0) {
@@ -813,6 +873,38 @@
       toast(publicErrorMessage(error), 'error');
     } finally {
       current.customMods.uploading = false;
+      refresh();
+    }
+  }
+
+  async function handleResourcePackFiles(fileList) {
+    const current = state();
+    if (!current || !fileList || fileList.length === 0 || !Nexus.api.resourcePacks) return;
+    current.resourcePacks.uploading = true;
+    if (Nexus.router.current === 'resourcepacks') refresh();
+    try {
+      const result = await Nexus.api.resourcePacks.addFiles(fileList);
+      current.resourcePacks.items = Array.isArray(result.items) ? result.items : [];
+      if (result.added > 0) {
+        const profile = resolveLaunchProfileForMods(current);
+        const incompat = Nexus.resourcePackInspector
+          ? Nexus.resourcePackInspector.findIncompatibleEnabledPacks(current.resourcePacks.items, profile.gameVersion)
+          : [];
+        if (incompat.length > 0) {
+          toast(t('msg.rpacksAddedIncompat', { count: result.added, incompat: incompat.length, mc: profile.gameVersion }), 'error');
+        } else {
+          toast(result.added === 1
+            ? t('msg.rpacksAddedOk', { count: result.added })
+            : t('msg.rpacksAddedPluralOk', { count: result.added }));
+        }
+      }
+      if (Array.isArray(result.errors) && result.errors.length > 0) {
+        toast(result.errors[0], 'error');
+      }
+    } catch (error) {
+      toast(publicErrorMessage(error), 'error');
+    } finally {
+      current.resourcePacks.uploading = false;
       refresh();
     }
   }
@@ -831,7 +923,7 @@
     try {
       const status = await Nexus.api.launch.start();
       applyLaunchStatus(status);
-      toast(`Iniciando Minecraft ${status.active ? status.active.versionId : current.config.launch.versionId}…`);
+      toast(t('msg.startingMc', { ver: status.active ? status.active.versionId : current.config.launch.versionId }));
     } catch (error) {
       current.launch.starting = false;
       refreshLaunchPanel();
@@ -850,18 +942,21 @@
     overlay.setAttribute('aria-modal', 'true');
     overlay.setAttribute('aria-labelledby', 'mod-compat-title');
 
+    const subtitleHtml = t('modModal.sub', {
+      mc: escapeHtml(profile.gameVersion),
+      loader: escapeHtml(loaderLabel)
+    });
+
     overlay.innerHTML = `
       <div class="pan-modal">
         <div class="pan-modal-head">
           <div class="pan-modal-title-group">
-            <span class="badge badge-error">Compatibilidad</span>
-            <h3 id="mod-compat-title">Hay mods activos incompatibles antes de jugar</h3>
+            <span class="badge badge-error">${escapeHtml(t('modModal.badge'))}</span>
+            <h3 id="mod-compat-title">${escapeHtml(t('modModal.title'))}</h3>
           </div>
-          <button type="button" class="btn btn-xs" data-modal-action="cancel" aria-label="Cerrar aviso">✕</button>
+          <button type="button" class="btn btn-xs" data-modal-action="cancel" aria-label="${escapeHtml(t('modModal.closeAria'))}">✕</button>
         </div>
-        <p class="pan-modal-subtitle">
-          Vas a iniciar <strong>Minecraft ${escapeHtml(profile.gameVersion)} (${escapeHtml(loaderLabel)})</strong>, pero estos mods tienen problemas de versión o cargador:
-        </p>
+        <p class="pan-modal-subtitle">${subtitleHtml}</p>
         <ul class="pan-modal-list">
           ${conflicts.map(({ mod, compat }) => `
             <li>
@@ -874,13 +969,13 @@
         </ul>
         <div class="pan-modal-actions">
           <button type="button" class="btn btn-primary btn-sm" data-modal-action="disable-and-play">
-            Desactivar incompatibles y jugar
+            ${escapeHtml(t('modModal.disablePlay'))}
           </button>
           <button type="button" class="btn btn-sm" data-modal-action="play-anyway">
-            Jugar igualmente
+            ${escapeHtml(t('modModal.playAnyway'))}
           </button>
           <button type="button" class="btn btn-sm btn-ghost" data-modal-action="go-mods">
-            Revisar en Mods
+            ${escapeHtml(t('modModal.reviewMods'))}
           </button>
         </div>
       </div>`;
@@ -922,7 +1017,7 @@
           }
           closeModCompatModal();
           refresh();
-          toast(`${res.disabledCount || conflicts.length} mods incompatibles desactivados.`);
+          toast(t('msg.modsIncompatDisabled', { count: res.disabledCount || conflicts.length }));
           await executePlayLaunch(playNode);
         } catch (error) {
           closeModCompatModal();
@@ -942,7 +1037,7 @@
       case 'play': {
         if (!Nexus.views.canPlay(current)) {
           const reason = (current.launch.preflight && current.launch.preflight.reasons || [])[0];
-          toast(reason ? reason.message : 'No se cumplen los requisitos para jugar.', 'error');
+          toast(reason ? reason.message : t('msg.reqsMissing'), 'error');
           break;
         }
         const profile = resolveLaunchProfileForMods(current);
@@ -962,7 +1057,7 @@
         node.disabled = true;
         try {
           await Nexus.api.launch.stop();
-          toast('Cerrando Minecraft…');
+          toast(t('msg.stoppingMc'));
         } catch (error) {
           node.disabled = false;
           toast(error.message, 'error');
@@ -982,7 +1077,7 @@
 
       case 'refresh-preflight':
         await refreshLaunchPreflight();
-        toast(current.launch.preflight.ready ? 'Requisitos comprobados: listo para jugar.' : 'Revisa los requisitos en el panel de juego.');
+        toast(current.launch.preflight.ready ? t('msg.reqsOk') : t('msg.reqsCheckPanel'));
         break;
 
       case 'navigate':
@@ -993,10 +1088,11 @@
         const id = node.getAttribute('data-version-id');
         if (!id || id === current.config.launch.versionId) return;
         if (!current.versions.some((version) => version.id === id)) {
-          toast('Versión no válida.', 'error');
+          toast(t('msg.versionInvalid'), 'error');
           return;
         }
-        await applyConfig({ launch: { versionId: id, loaderVersion: null, activeInstallationId: null } }, `Versión ${id} seleccionada.`);
+        await applyConfig({ launch: { versionId: id, loaderVersion: null, activeInstallationId: null } }, t('msg.versionSelected', { id }));
+        warnCompatibilityOnTargetChange(state());
         ensureDirectLoaderCatalog(false).catch(() => {});
         break;
       }
@@ -1007,9 +1103,28 @@
         const label = DIRECT_LOADER_LABELS[loader] || loader;
         await applyConfig(
           { launch: { loader, loaderVersion: null, activeInstallationId: null } },
-          `Cargador cambiado a ${label}.`
+          t('msg.loaderChanged', { label })
         );
+        warnCompatibilityOnTargetChange(state());
         ensureDirectLoaderCatalog(false).catch(() => {});
+        break;
+      }
+
+      case 'disable-all-incompatible': {
+        const profile = resolveLaunchProfileForMods(current);
+        let disabledTotal = 0;
+        if (Nexus.api.mods && typeof Nexus.api.mods.disableIncompatible === 'function') {
+          const modRes = await Nexus.api.mods.disableIncompatible(profile.gameVersion, profile.loader);
+          if (Array.isArray(modRes.items)) current.customMods.items = modRes.items;
+          disabledTotal += Number(modRes.disabledCount || 0);
+        }
+        if (Nexus.api.resourcePacks && typeof Nexus.api.resourcePacks.disableIncompatible === 'function') {
+          const rpRes = await Nexus.api.resourcePacks.disableIncompatible(profile.gameVersion);
+          if (Array.isArray(rpRes.items)) current.resourcePacks.items = rpRes.items;
+          disabledTotal += Number(rpRes.disabledCount || 0);
+        }
+        refresh();
+        toast(t('msg.allIncompatDisabled', { count: disabledTotal }));
         break;
       }
 
@@ -1020,11 +1135,11 @@
       case 'install-version': {
         const id = node.getAttribute('data-version-id');
         if (!id || !current.versions.some((version) => version.id === id)) {
-          toast('Versión no válida.', 'error');
+          toast(t('msg.versionInvalid'), 'error');
           return;
         }
         if (current.install.active || (current.installations && current.installations.status.active)) {
-          toast('Hay otra instalación en curso.', 'error');
+          toast(t('msg.otherInstallRunning'), 'error');
           return;
         }
         node.disabled = true;
@@ -1034,7 +1149,7 @@
           current.install.progress = {
             versionId: id,
             phase: 'metadata',
-            phaseLabel: 'Preparando metadatos',
+            phaseLabel: t('install.preparingMeta'),
             file: '',
             downloaded: 0,
             total: 0,
@@ -1043,11 +1158,11 @@
             eta: 0,
             filesDone: 0,
             filesTotal: 0,
-            message: `Preparando instalación de ${id}…`
+            message: `${id}…`
           };
           refreshInstallProgress();
           refreshVersionGrid();
-          toast(`Instalando ${id} desde servidores oficiales…`);
+          toast(t('msg.installingOfficial', { id }));
         } catch (error) {
           node.disabled = false;
           toast(error.message, 'error');
@@ -1059,7 +1174,7 @@
         const id = node.getAttribute('data-version-id');
         try {
           await Nexus.api.install.cancel(id || null);
-          toast('Cancelación solicitada.');
+          toast(t('msg.cancelRequested'));
         } catch (error) {
           toast(error.message, 'error');
         }
@@ -1108,7 +1223,7 @@
       case 'set-ram': {
         const ramMb = Number(node.getAttribute('data-ram'));
         if (!Number.isInteger(ramMb) || ramMb < 1024 || ramMb > 16384) return;
-        await applyConfig({ launch: { ramMb } }, `Memoria ajustada a ${formatRam(ramMb)}.`);
+        await applyConfig({ launch: { ramMb } }, t('msg.ramUpdated', { ram: formatRam(ramMb) }));
         break;
       }
 
@@ -1117,10 +1232,10 @@
         if (!input) return;
         const minRamMb = Number(input.value);
         if (!Number.isInteger(minRamMb) || minRamMb < 256 || minRamMb > 8192) {
-          toast('La memoria inicial debe estar entre 256 MB y 8 GB.', 'error');
+          toast(t('msg.minRamRange'), 'error');
           return;
         }
-        await applyConfig({ launch: { minRamMb } }, `Memoria inicial ajustada a ${minRamMb} MB.`);
+        await applyConfig({ launch: { minRamMb } }, t('msg.minRamUpdated', { mb: minRamMb }));
         break;
       }
 
@@ -1129,18 +1244,18 @@
         if (!input) return;
         const javaPath = input.value.trim();
         if (javaPath.length > 1024) {
-          toast('La ruta de Java es demasiado larga.', 'error');
+          toast(t('msg.javaTooLong'), 'error');
           return;
         }
-        await applyConfig({ launch: { javaPath } }, javaPath ? 'Ruta de Java guardada.' : 'Ruta de Java eliminada.');
+        await applyConfig({ launch: { javaPath } }, javaPath ? t('msg.javaSaved') : t('msg.javaCleared'));
         break;
       }
 
       case 'detect-java':
         await refreshJavaStatus();
         toast(current.launch.javaStatus && current.launch.javaStatus.installations.length
-          ? `Se detectaron ${current.launch.javaStatus.installations.length} instalaciones de Java.`
-          : 'No se detectó Java. Instálalo o indica su ruta.');
+          ? t('msg.javaDetected', { count: current.launch.javaStatus.installations.length })
+          : t('msg.javaMissing'));
         break;
 
       case 'save-client-id': {
@@ -1149,12 +1264,12 @@
         const clientId = input.value.trim();
         const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
         if (clientId && !uuid.test(clientId)) {
-          toast('El Client ID debe ser un UUID de Microsoft Entra.', 'error');
+          toast(t('msg.clientIdInvalid'), 'error');
           return;
         }
         await applyConfig(
           { microsoft: { clientId } },
-          clientId ? 'Client ID guardado.' : 'Client ID eliminado.'
+          clientId ? t('msg.clientIdSaved') : t('msg.clientIdCleared')
         );
         break;
       }
@@ -1167,14 +1282,14 @@
           if (action === 'ms-logout') {
             await Nexus.api.auth.signOut();
             await refreshAuthAndConfig();
-            toast('Sesión cerrada.');
+            toast(t('msg.signedOut'));
           } else {
             const profile = action === 'ms-restore'
               ? await Nexus.api.auth.restore()
               : await Nexus.api.auth.signIn();
-            if (!profile) throw new Error('No se pudo obtener el perfil de Minecraft.');
+            if (!profile) throw new Error(t('msg.msProfileFail'));
             await refreshAuthAndConfig();
-            toast(`Sesión iniciada como ${profile.name}.`);
+            toast(t('msg.signedIn', { name: profile.name }));
           }
         } catch (error) {
           toast(error.message, 'error');
@@ -1189,9 +1304,7 @@
         node.disabled = true;
         try {
           await Nexus.api.session.setMode(mode);
-          await refreshSession(mode === 'offline'
-            ? 'Modo Offline activado: tu identidad es local y no usa Microsoft.'
-            : 'Modo Online activado: se usa tu cuenta Microsoft oficial.');
+          await refreshSession(mode === 'offline' ? t('msg.modeOffline') : t('msg.modeOnline'));
         } catch (error) {
           node.disabled = false;
           toast(error.message, 'error');
@@ -1204,13 +1317,13 @@
         if (!input) return;
         const name = input.value.trim();
         if (!/^[A-Za-z0-9_]{1,16}$/.test(name)) {
-          toast('El nombre debe tener entre 1 y 16 letras, números o guion bajo.', 'error');
+          toast(t('msg.playerNameInvalid'), 'error');
           return;
         }
         try {
           await Nexus.api.players.create(name);
           input.value = '';
-          await refreshSession(`Perfil local "${name}" creado y seleccionado.`);
+          await refreshSession(t('msg.playerCreated', { name }));
         } catch (error) {
           toast(error.message, 'error');
         }
@@ -1223,12 +1336,12 @@
         if (!id || !input) return;
         const name = input.value.trim();
         if (!/^[A-Za-z0-9_]{1,16}$/.test(name)) {
-          toast('El nombre debe tener entre 1 y 16 letras, números o guion bajo.', 'error');
+          toast(t('msg.playerNameInvalid'), 'error');
           return;
         }
         try {
           await Nexus.api.players.update(id, name);
-          await refreshSession('Perfil local actualizado.');
+          await refreshSession(t('msg.playerUpdated'));
         } catch (error) {
           toast(error.message, 'error');
         }
@@ -1240,7 +1353,7 @@
         if (!id) return;
         try {
           await Nexus.api.players.remove(id);
-          await refreshSession('Perfil local eliminado.');
+          await refreshSession(t('msg.playerRemoved'));
         } catch (error) {
           toast(error.message, 'error');
         }
@@ -1252,7 +1365,7 @@
         if (!id) return;
         try {
           await Nexus.api.players.select(id);
-          await refreshSession('Perfil local activo.');
+          await refreshSession(t('msg.playerSelected'));
         } catch (error) {
           toast(error.message, 'error');
         }
@@ -1281,11 +1394,11 @@
         const gameVersion = current.loaders.base;
         const loaderVersion = current.loaders.selected;
         if (!loader || !gameVersion || !loaderVersion) {
-          toast('Selecciona una versión base y una versión del cargador.', 'error');
+          toast(t('msg.loaderMissingFields'), 'error');
           return;
         }
         if (current.loaders.status.active) {
-          toast('Ya hay una instalación de loader en curso.', 'error');
+          toast(t('msg.loaderRunning'), 'error');
           return;
         }
         try {
@@ -1294,17 +1407,17 @@
           current.loaders.progress = {
             versionId: current.loaders.status.active.versionId,
             phase: 'metadata',
-            phaseLabel: 'Preparando instalación',
+            phaseLabel: t('install.preparingInst'),
             file: '',
             downloaded: 0,
             total: 0,
             percent: 0,
             filesDone: 0,
             filesTotal: 0,
-            message: `Preparando ${loader} ${loaderVersion} para ${gameVersion}…`
+            message: `${loader} ${loaderVersion} (${gameVersion})…`
           };
           refresh();
-          toast(`Instalando ${loader} desde fuentes oficiales…`);
+          toast(t('msg.loaderInstalling', { loader }));
         } catch (error) {
           toast(error.message, 'error');
         }
@@ -1314,7 +1427,7 @@
       case 'loader-cancel':
         try {
           await Nexus.api.loaders.cancel();
-          toast('Cancelación solicitada.');
+          toast(t('msg.cancelRequested'));
         } catch (error) {
           toast(error.message, 'error');
         }
@@ -1325,10 +1438,11 @@
         if (!id) return;
         const installed = (current.loaders.status.installed || []).some((item) => item.id === id);
         if (!installed) {
-          toast('Perfil de loader no disponible.', 'error');
+          toast(t('msg.loaderUnavailable'), 'error');
           return;
         }
-        await applyConfig({ launch: { versionId: id, activeInstallationId: null } }, `Perfil ${id} seleccionado.`);
+        await applyConfig({ launch: { versionId: id, activeInstallationId: null } }, t('msg.profileSelected', { id }));
+        warnCompatibilityOnTargetChange(state());
         break;
       }
 
@@ -1368,7 +1482,7 @@
           current.versionsSource = result.source;
           refresh();
           if (result.warning) toast(result.warning, 'warning');
-          else toast('Lista de versiones actualizada.', 'success');
+          else toast(t('msg.versionsRefreshed'), 'success');
         } catch (error) {
           toast(publicErrorMessage(error), 'error');
         } finally {
@@ -1405,14 +1519,14 @@
         const ramMb = Number(node.getAttribute('data-ram'));
         const minRamMb = Number(node.getAttribute('data-min-ram'));
         if (!Number.isInteger(ramMb) || !Number.isInteger(minRamMb) || minRamMb >= ramMb) break;
-        await applyConfig({ launch: { ramMb, minRamMb } }, 'Recomendación de RAM aplicada a la configuración global.');
+        await applyConfig({ launch: { ramMb, minRamMb } }, t('msg.ramRecApplied'));
         break;
       }
 
       case 'toggle-low-end-mode': {
         const enabled = !Boolean(current.config.general.lowEndMode);
         await applyConfig({ general: { lowEndMode: enabled } },
-          enabled ? 'Modo PC de baja gama activado.' : 'Modo PC de baja gama desactivado.');
+          enabled ? t('msg.lowEndOn') : t('msg.lowEndOff'));
         break;
       }
 
@@ -1446,15 +1560,15 @@
         const form = current.newInstall;
         if (form.submitting) return;
         if (current.installations.status.active) {
-          toast('Ya hay una instalación en curso.', 'error');
+          toast(t('msg.otherInstallRunning'), 'error');
           return;
         }
         if (!form.name || !form.gameVersion || !form.ramMb || !form.minRamMb) {
-          toast('Completa el nombre, la versión y la memoria.', 'error');
+          toast(t('msg.newInstallMissing'), 'error');
           return;
         }
         if (form.loader !== 'vanilla' && !form.loaderVersion) {
-          toast('Selecciona una versión de cargador compatible.', 'error');
+          toast(t('msg.newInstallLoaderMissing'), 'error');
           return;
         }
         node.disabled = true;
@@ -1472,21 +1586,19 @@
           await Nexus.api.installations.start(installation.id);
           await refreshInstallationStatus();
           Nexus.router.navigate('installations');
-          toast(`Instalación "${installation.name}" creada. Descargando desde fuentes oficiales…`);
+          toast(t('msg.newInstallCreated', { name: installation.name }));
         } catch (error) {
           toast(publicErrorMessage(error), 'error');
         } finally {
           form.submitting = false;
           node.disabled = false;
-          // El progreso del loader puede haber recreado el botón mientras el
-          // envío estaba en curso: actualiza el nodo que está ahora en la UI.
           updateNewInstallSubmitState();
         }
         break;
       }
 
       case 'installation-refresh':
-        await refreshInstallationStatus('Estado de instalaciones actualizado.');
+        await refreshInstallationStatus(t('msg.instStatusUpdated'));
         break;
 
       case 'installation-select':
@@ -1500,7 +1612,8 @@
           current.config = await Nexus.api.getConfig();
           await refreshLaunchPreflight();
           await refreshInstallationStatus();
-          toast(action === 'installation-select' ? 'Instalación activa seleccionada.' : 'Modo heredado activado.');
+          toast(action === 'installation-select' ? t('msg.instSelected') : t('msg.instLegacy'));
+          warnCompatibilityOnTargetChange(state());
         } catch (error) {
           toast(error.message, 'error');
         }
@@ -1520,15 +1633,15 @@
             installationId: result.installationId,
             versionId: result.versionId,
             phase: 'metadata',
-            phaseLabel: 'Preparando instalación',
+            phaseLabel: t('install.preparingInst'),
             percent: 0,
             filesDone: 0,
             filesTotal: 0,
-            message: 'Preparando descargas oficiales…'
+            message: '…'
           };
           refreshInstallationProgress();
           refreshInstallationGrid();
-          toast('Instalación iniciada.');
+          toast(t('msg.instStarted'));
         } catch (error) {
           toast(error.message, 'error');
         }
@@ -1538,7 +1651,7 @@
       case 'installation-cancel':
         try {
           await Nexus.api.installations.cancel(node.getAttribute('data-id'));
-          toast('Cancelación solicitada.');
+          toast(t('msg.cancelRequested'));
         } catch (error) {
           toast(error.message, 'error');
         }
@@ -1559,7 +1672,7 @@
           });
           await refreshInstallationStatus();
           await refreshLaunchPreflight();
-          toast('Instalación actualizada.');
+          toast(t('msg.instUpdated'));
         } catch (error) {
           toast(error.message, 'error');
         }
@@ -1569,14 +1682,18 @@
       case 'installation-remove': {
         const id = node.getAttribute('data-id');
         const installation = (current.installations.list || []).find((item) => item.id === id);
-        if (!installation || !window.confirm(`¿Eliminar "${installation.name}" y su directorio de juego? Esta acción no se puede deshacer.`)) return;
+        if (!installation) return;
+        const confirmed = await confirmModal({
+          message: t('msg.instRemoveConfirm', { name: installation.name })
+        });
+        if (!confirmed) return;
         try {
           await Nexus.api.installations.remove(id);
           current.config = await Nexus.api.getConfig();
           if (current.folders.installationId === id) current.folders.installationId = null;
           await refreshInstallationStatus();
           await refreshLaunchPreflight();
-          toast('Instalación eliminada.');
+          toast(t('msg.instRemoved'));
         } catch (error) {
           toast(error.message, 'error');
         }
@@ -1608,14 +1725,14 @@
       }
 
       case 'folders-refresh':
-        await refreshFolders('Carpetas actualizadas.');
+        await refreshFolders(t('msg.foldersRefreshed'));
         break;
 
       case 'folders-open': {
         try {
           const result = await Nexus.api.folders.open(current.folders.installationId, node.getAttribute('data-key'));
-          if (!result.ok) throw new Error(result.error || 'No se pudo abrir la carpeta.');
-          toast('Carpeta abierta.');
+          if (!result.ok) throw new Error(result.error || t('msg.folderOpenFail'));
+          toast(t('msg.folderOpened'));
         } catch (error) {
           toast(error.message, 'error');
         }
@@ -1625,7 +1742,7 @@
       case 'folders-copy': {
         try {
           await Nexus.api.folders.copy(current.folders.installationId, node.getAttribute('data-key'));
-          toast('Ruta copiada al portapapeles.');
+          toast(t('msg.pathCopied'));
         } catch (error) {
           toast(error.message, 'error');
         }
@@ -1638,9 +1755,9 @@
         try {
           const result = await Nexus.api.skins.pickImport(model);
           if (result.cancelled) {
-            toast('Importación cancelada.');
+            toast(t('msg.skinCancelled'));
           } else {
-            await refreshSkins(`Skin "${result.skin.name}" importada. No se ha subido a Microsoft.`);
+            await refreshSkins(t('msg.skinImported', { name: result.skin.name }));
           }
         } catch (error) {
           toast(error.message, 'error');
@@ -1651,7 +1768,7 @@
       case 'skin-model': {
         try {
           await Nexus.api.skins.setModel(node.getAttribute('data-id'), node.getAttribute('data-model'));
-          await refreshSkins('Modelo de skin actualizado.');
+          await refreshSkins(t('msg.skinModelUpdated'));
         } catch (error) {
           toast(error.message, 'error');
         }
@@ -1661,7 +1778,7 @@
       case 'skin-select': {
         try {
           await Nexus.api.skins.select(node.getAttribute('data-id'));
-          await refreshSkins('Skin activa en la biblioteca local.');
+          await refreshSkins(t('msg.skinSelected'));
         } catch (error) {
           toast(error.message, 'error');
         }
@@ -1671,10 +1788,14 @@
       case 'skin-remove': {
         const id = node.getAttribute('data-id');
         const skin = (current.skins.items || []).find((item) => item.id === id);
-        if (!skin || !window.confirm(`¿Eliminar la skin "${skin.name}" de la biblioteca local?`)) return;
+        if (!skin) return;
+        const confirmed = await confirmModal({
+          message: t('msg.skinRemoveConfirm', { name: skin.name })
+        });
+        if (!confirmed) return;
         try {
           await Nexus.api.skins.remove(id);
-          await refreshSkins('Skin eliminada.');
+          await refreshSkins(t('msg.skinRemoved'));
         } catch (error) {
           toast(error.message, 'error');
         }
@@ -1682,14 +1803,14 @@
       }
 
       case 'skin-refresh':
-        await refreshSkins('Biblioteca de skins actualizada.');
+        await refreshSkins(t('msg.skinsRefreshed'));
         break;
 
       case 'reset-config':
         try {
           await Nexus.api.resetConfig();
           await refreshAuthAndConfig();
-          toast('Configuración restablecida.');
+          toast(t('msg.configReset'));
         } catch (error) {
           toast(error.message, 'error');
         }
@@ -1699,6 +1820,7 @@
         const presetId = node.getAttribute('data-preset');
         const preset = Nexus.perfEngine && Nexus.perfEngine.PRESETS[presetId];
         if (!preset) break;
+        const presetName = t(`perf.preset.${preset.id}.name`, null, preset.name);
         await applyConfig(
           {
             performance: {
@@ -1711,7 +1833,7 @@
               ...preset.video
             }
           },
-          `Modo "${preset.name}" activado.`
+          t('msg.presetActivated', { name: presetName })
         );
         break;
       }
@@ -1719,7 +1841,7 @@
       case 'perf-set-gc': {
         const gc = node.getAttribute('data-gc');
         if (!['ZGC', 'G1GC', 'Shenandoah'].includes(gc)) break;
-        await applyConfig({ performance: { gc } }, `Recolector JVM ajustado a ${gc}.`);
+        await applyConfig({ performance: { gc } }, t('msg.gcUpdated', { gc }));
         break;
       }
 
@@ -1729,7 +1851,7 @@
         if (navigator.clipboard && navigator.clipboard.writeText) {
           await navigator.clipboard.writeText(text).catch(() => {});
         }
-        toast('Argumentos JVM copiados al portapapeles.');
+        toast(t('msg.jvmCopied'));
         break;
       }
 
@@ -1739,7 +1861,7 @@
         if (navigator.clipboard && navigator.clipboard.writeText) {
           await navigator.clipboard.writeText(text).catch(() => {});
         }
-        toast('Contenido de options.txt copiado al portapapeles.');
+        toast(t('msg.optionsCopied'));
         break;
       }
 
@@ -1770,7 +1892,7 @@
           link.click();
           link.remove();
           window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-          toast(`Paquete .mrpack (${loader} ${mcVersion}) descargado.`);
+          toast(t('msg.mrpackDownloaded', { loader, mc: mcVersion }));
         } catch (error) {
           toast(publicErrorMessage(error), 'error');
         } finally {
@@ -1783,12 +1905,7 @@
         const order = ['quit', 'minimize', 'keep'];
         const cur = (current.config.general && current.config.general.closeBehavior) || 'quit';
         const next = order[(order.indexOf(cur) + 1) % order.length];
-        const messages = {
-          quit: 'El launcher se cerrará al iniciar Minecraft (ahorra RAM).',
-          minimize: 'El launcher se minimizará al iniciar Minecraft.',
-          keep: 'El launcher permanecerá abierto mientras juegas.'
-        };
-        await applyConfig({ general: { closeBehavior: next } }, messages[next]);
+        await applyConfig({ general: { closeBehavior: next } }, t(`close.${next}.toast`));
         break;
       }
 
@@ -1802,7 +1919,7 @@
         try {
           const res = await Nexus.api.mods.openFolder();
           if (res && res.ok === false && res.error) toast(res.error, 'error');
-          else toast('Carpeta de mods abierta.');
+          else toast(t('msg.modsFolderOpened'));
         } catch (error) {
           toast(publicErrorMessage(error), 'error');
         }
@@ -1812,7 +1929,7 @@
       case 'custom-mods-refresh': {
         try {
           await refreshCustomMods();
-          toast('Lista de mods sincronizada.');
+          toast(t('msg.modsSynced'));
         } catch (error) {
           toast(publicErrorMessage(error), 'error');
         }
@@ -1825,7 +1942,7 @@
           const res = await Nexus.api.mods.disableIncompatible(profile.gameVersion, profile.loader);
           current.customMods.items = Array.isArray(res.items) ? res.items : [];
           refresh();
-          toast(`${res.disabledCount || 0} mods incompatibles desactivados.`);
+          toast(t('msg.modsIncompatDisabled', { count: res.disabledCount || 0 }));
         } catch (error) {
           toast(publicErrorMessage(error), 'error');
         }
@@ -1838,7 +1955,66 @@
         try {
           current.customMods.items = await Nexus.api.mods.remove(id);
           refresh();
-          toast('Mod eliminado.');
+          toast(t('msg.modRemoved'));
+        } catch (error) {
+          toast(publicErrorMessage(error), 'error');
+        }
+        break;
+      }
+
+      case 'rpacks-pick': {
+        const input = document.getElementById('rpacks-file-input');
+        if (input) input.click();
+        break;
+      }
+
+      case 'rpacks-open-folder': {
+        try {
+          const res = await Nexus.api.resourcePacks.openFolder();
+          if (res && res.ok === false && res.error) toast(res.error, 'error');
+          else toast(t('msg.rpacksFolderOpened'));
+        } catch (error) {
+          toast(publicErrorMessage(error), 'error');
+        }
+        break;
+      }
+
+      case 'rpacks-refresh': {
+        try {
+          await refreshResourcePacks();
+          toast(t('msg.rpacksSynced'));
+        } catch (error) {
+          toast(publicErrorMessage(error), 'error');
+        }
+        break;
+      }
+
+      case 'rpacks-disable-incompatible': {
+        const profile = resolveLaunchProfileForMods(current);
+        try {
+          const res = await Nexus.api.resourcePacks.disableIncompatible(profile.gameVersion);
+          current.resourcePacks.items = Array.isArray(res.items) ? res.items : [];
+          refresh();
+          toast(t('msg.rpacksIncompatDisabled', { count: res.disabledCount || 0 }));
+        } catch (error) {
+          toast(publicErrorMessage(error), 'error');
+        }
+        break;
+      }
+
+      case 'rpack-remove': {
+        const id = node.getAttribute('data-id');
+        if (!id) break;
+        const pack = (current.resourcePacks && current.resourcePacks.items || []).find((p) => p.id === id);
+        if (!pack) break;
+        const confirmed = await confirmModal({
+          message: t('rpack.removeConfirm', { name: pack.name || pack.filename })
+        });
+        if (!confirmed) break;
+        try {
+          current.resourcePacks.items = await Nexus.api.resourcePacks.remove(id);
+          refresh();
+          toast(t('msg.rpackRemoved'));
         } catch (error) {
           toast(publicErrorMessage(error), 'error');
         }
@@ -1852,7 +2028,7 @@
         break;
 
       case 'placeholder':
-        toast('Esta función se implementará en una fase posterior.');
+        toast(t('msg.placeholderNotice'));
         break;
 
       default:
@@ -1864,6 +2040,23 @@
     document.querySelectorAll('.nav-item[data-view]').forEach((button) => {
       button.addEventListener('click', () => Nexus.router.navigate(button.getAttribute('data-view')));
     });
+
+    const langBtn = document.getElementById('btn-lang-switch');
+    if (langBtn) {
+      langBtn.addEventListener('click', () => {
+        if (!Nexus.i18n) return;
+        const nextLang = Nexus.i18n.getLang() === 'en' ? 'es' : 'en';
+        Nexus.i18n.setLang(nextLang, { syncConfig: true });
+        if (state() && state().config && state().config.general) {
+          state().config.general.language = nextLang;
+        }
+        const select = document.getElementById('language-select');
+        if (select) select.value = nextLang;
+        updateShell();
+        refreshLaunchPreflight().catch(() => {});
+        toast(t('msg.langSaved'));
+      });
+    }
 
     const tourBtn = document.getElementById('btn-start-tour');
     if (tourBtn) {
@@ -1885,18 +2078,20 @@
       return Boolean(types && Array.from(types).includes('Files'));
     };
 
+    const getDropZone = (target) => target && (target.closest('#mods-dropzone') || target.closest('#rpacks-dropzone'));
+
     document.addEventListener('dragover', (event) => {
       if (hasDraggedFiles(event)) event.preventDefault();
     });
 
     document.addEventListener('drop', (event) => {
-      if (hasDraggedFiles(event) && !event.target.closest('#mods-dropzone')) {
+      if (hasDraggedFiles(event) && !getDropZone(event.target)) {
         event.preventDefault();
       }
     });
 
     root.addEventListener('dragenter', (event) => {
-      const zone = event.target.closest('#mods-dropzone');
+      const zone = getDropZone(event.target);
       if (zone && hasDraggedFiles(event)) {
         event.preventDefault();
         zone.classList.add('is-dragover');
@@ -1904,7 +2099,7 @@
     });
 
     root.addEventListener('dragover', (event) => {
-      const zone = event.target.closest('#mods-dropzone');
+      const zone = getDropZone(event.target);
       if (zone && hasDraggedFiles(event)) {
         event.preventDefault();
         if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
@@ -1913,20 +2108,23 @@
     });
 
     root.addEventListener('dragleave', (event) => {
-      const zone = event.target.closest('#mods-dropzone');
+      const zone = getDropZone(event.target);
       if (zone && !zone.contains(event.relatedTarget)) {
         zone.classList.remove('is-dragover');
       }
     });
 
     root.addEventListener('drop', (event) => {
-      const zone = event.target.closest('#mods-dropzone');
+      const modsZone = event.target.closest('#mods-dropzone');
+      const rpacksZone = event.target.closest('#rpacks-dropzone');
+      const zone = modsZone || rpacksZone;
       if (!zone) return;
       event.preventDefault();
       zone.classList.remove('is-dragover');
       const files = event.dataTransfer && event.dataTransfer.files;
       if (files && files.length) {
-        handleCustomModFiles(files);
+        if (rpacksZone) handleResourcePackFiles(files);
+        else handleCustomModFiles(files);
       }
     });
 
@@ -1952,14 +2150,14 @@
         if (label) label.textContent = formatRam(Number(target.value));
       } else if (target.id === 'perf-render-distance') {
         const label = document.getElementById('perf-render-val');
-        if (label) label.textContent = `${target.value} chunks`;
+        if (label) label.textContent = t('perf.chunksUnit', { n: target.value });
       } else if (target.id === 'perf-simulation-distance') {
         const label = document.getElementById('perf-sim-val');
-        if (label) label.textContent = `${target.value} chunks`;
+        if (label) label.textContent = t('perf.chunksUnit', { n: target.value });
       } else if (target.id === 'perf-max-fps') {
         const val = Number(target.value);
         const label = document.getElementById('perf-fps-val');
-        if (label) label.textContent = val >= 260 ? 'Ilimitado' : `${val} FPS`;
+        if (label) label.textContent = val >= 260 ? t('perf.unlimited') : `${val} FPS`;
       } else if (target.id === 'perf-ram-mb') {
         const mb = Number(target.value);
         const label = document.getElementById('perf-ram-val');
@@ -1977,21 +2175,17 @@
       } else if (target.id === 'language-select') {
         const language = target.value;
         if (language === 'es' || language === 'en') {
-          applyConfig({ general: { language } }, 'Idioma guardado.');
+          if (Nexus.i18n) Nexus.i18n.setLang(language, { syncConfig: false });
+          applyConfig({ general: { language } }, t('msg.langSaved'));
         }
       } else if (target.id === 'close-behavior-select') {
         const closeBehavior = target.value;
         if (closeBehavior === 'quit' || closeBehavior === 'minimize' || closeBehavior === 'keep') {
-          const labels = {
-            quit: 'El launcher se cerrará al iniciar Minecraft.',
-            minimize: 'El launcher se minimizará al iniciar Minecraft.',
-            keep: 'El launcher permanecerá abierto mientras juegas.'
-          };
-          applyConfig({ general: { closeBehavior } }, labels[closeBehavior]);
+          applyConfig({ general: { closeBehavior } }, t(`close.${closeBehavior}.toast`));
         }
       } else if (target.id === 'low-end-toggle') {
         applyConfig({ general: { lowEndMode: target.checked } },
-          target.checked ? 'Modo PC de baja gama activado.' : 'Modo PC de baja gama desactivado.');
+          target.checked ? t('msg.lowEndOn') : t('msg.lowEndOff'));
       } else if (target.id === 'perf-hardware-tier') {
         applyConfig({ performance: { hardwareTier: target.value } });
       } else if (target.id === 'perf-export-loader') {
@@ -2044,7 +2238,9 @@
         state().folders.installationId = target.value;
         refreshFolders().catch((error) => toast(error.message, 'error'));
       } else if (target.id === 'home-loader-version') {
-        applyConfig({ launch: { loaderVersion: target.value || null } });
+        applyConfig({ launch: { loaderVersion: target.value || null } })
+          .then(() => warnCompatibilityOnTargetChange(state()))
+          .catch(() => {});
       } else if (target.id === 'skin-import-model') {
         state().skins.importModel = target.value;
       } else if (target.id === 'mods-file-input') {
@@ -2057,6 +2253,20 @@
           Nexus.api.mods.toggle(id, target.checked)
             .then((items) => {
               state().customMods.items = items;
+              refresh();
+            })
+            .catch((error) => toast(publicErrorMessage(error), 'error'));
+        }
+      } else if (target.id === 'rpacks-file-input') {
+        const files = target.files ? Array.from(target.files) : [];
+        target.value = '';
+        if (files.length) handleResourcePackFiles(files);
+      } else if (target.classList && target.classList.contains('rpack-toggle')) {
+        const id = target.getAttribute('data-id');
+        if (id && Nexus.api.resourcePacks) {
+          Nexus.api.resourcePacks.toggle(id, target.checked)
+            .then((items) => {
+              state().resourcePacks.items = items;
               refresh();
             })
             .catch((error) => toast(publicErrorMessage(error), 'error'));
@@ -2090,13 +2300,23 @@
     refresh();
   }
 
+  function maybeAutoStartTour() {
+    if (Nexus.tour && typeof Nexus.tour.shouldAutoStart === 'function' && Nexus.tour.shouldAutoStart()) {
+      window.setTimeout(() => {
+        if (Nexus.tour && !Nexus.tour.isActive()) {
+          Nexus.tour.start(0);
+        }
+      }, 280);
+    }
+  }
+
   async function boot() {
     root = document.getElementById('view-root');
 
     try {
       const [
         info, config, auth, sessionStatus, installStatus, launchStatus, loaderStatus,
-        installationStatus, logoInfo, customModList
+        installationStatus, logoInfo, customModList, resourcePackList
       ] = await Promise.all([
         Nexus.api.getInfo(),
         Nexus.api.getConfig(),
@@ -2107,8 +2327,17 @@
         Nexus.api.loaders.status(),
         Nexus.api.installations.status(),
         Nexus.api.logo.get(),
-        Nexus.api.mods.list().catch(() => [])
+        Nexus.api.mods.list().catch(() => []),
+        Nexus.api.resourcePacks ? Nexus.api.resourcePacks.list().catch(() => []) : Promise.resolve([])
       ]);
+
+      if (Nexus.i18n && Nexus.i18n.hasChosenLang() && config && config.general) {
+        const chosen = Nexus.i18n.getLang();
+        if (config.general.language !== chosen) {
+          config.general.language = chosen;
+          Nexus.api.updateConfig({ general: { language: chosen } }).catch(() => {});
+        }
+      }
 
       const installationList = Array.isArray(installationStatus.installations)
         ? installationStatus.installations
@@ -2138,7 +2367,7 @@
         },
         launch: {
           status: launchStatus || null,
-          preflight: { ready: false, reasons: [{ code: 'loading', message: 'Comprobando requisitos…' }] },
+          preflight: { ready: false, reasons: [{ code: 'loading', message: t('launch.checkingReqs') }] },
           javaStatus: null,
           lines: Array.isArray(launchStatus && launchStatus.lines) ? launchStatus.lines.slice(-40) : [],
           starting: false
@@ -2202,6 +2431,10 @@
           items: Array.isArray(customModList) ? customModList : [],
           uploading: false
         },
+        resourcePacks: {
+          items: Array.isArray(resourcePackList) ? resourcePackList : [],
+          uploading: false
+        },
         directLoader: {
           loader: null,
           gameVersion: null,
@@ -2222,6 +2455,9 @@
 
       applyLowEndMode(config);
       applyLogo(logoInfo);
+      if (Nexus.i18n && typeof Nexus.i18n.hydrateShell === 'function') {
+        Nexus.i18n.hydrateShell();
+      }
       Nexus.router.init();
       wireEvents();
       wireInstallProgress();
@@ -2239,6 +2475,7 @@
         }
         if (view === 'folders') refreshFolders().catch(() => {});
         if (view === 'mods') refreshCustomMods().catch(() => {});
+        if (view === 'resourcepacks') refreshResourcePacks().catch(() => {});
         if (view === 'installations') refreshInstallationStatus().catch(() => {});
         if (view === 'skins') ensureSkins(false).catch(() => {});
       };
@@ -2251,6 +2488,7 @@
         ensureNewInstallCatalog(false).catch(() => {});
       }
       if (Nexus.router.current === 'folders') refreshFolders().catch(() => {});
+      if (Nexus.router.current === 'resourcepacks') refreshResourcePacks().catch(() => {});
       if (Nexus.router.current === 'skins') ensureSkins(false).catch(() => {});
       window.addEventListener('pagehide', () => {
         cancelPendingSearch();
@@ -2262,12 +2500,14 @@
       ensureDirectLoaderCatalog(false).catch(() => {});
       updateShell();
       hydrateIcons(document.querySelector('.app-shell'));
-      if (Nexus.tour && typeof Nexus.tour.shouldAutoStart === 'function' && Nexus.tour.shouldAutoStart()) {
-        window.setTimeout(() => {
-          if (Nexus.tour && !Nexus.tour.isActive()) {
-            Nexus.tour.start(0);
-          }
-        }, 280);
+      if (Nexus.i18n && typeof Nexus.i18n.hasChosenLang === 'function' && !Nexus.i18n.hasChosenLang()) {
+        Nexus.i18n.showLanguageModal(() => {
+          updateShell();
+          refreshLaunchPreflight().catch(() => {});
+          maybeAutoStartTour();
+        });
+      } else {
+        maybeAutoStartTour();
       }
       Nexus.api.listVersions().then(applyVersionCatalog).catch((error) => {
         const current = state();
@@ -2280,7 +2520,7 @@
       });
     } catch (error) {
       if (root) {
-        root.innerHTML = `<div class="error-state"><h2>No se pudo iniciar Pan Launcher</h2><p>${escapeHtml(error.message)}</p></div>`;
+        root.innerHTML = `<div class="error-state"><h2>${escapeHtml(t('shell.bootError'))}</h2><p>${escapeHtml(error.message)}</p></div>`;
       }
     }
   }

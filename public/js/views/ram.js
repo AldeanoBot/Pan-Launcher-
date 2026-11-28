@@ -6,6 +6,14 @@
 
   Nexus.views = Nexus.views || {};
 
+  function t(key, vars, fallback) {
+    if (Nexus.i18n && typeof Nexus.i18n.t === 'function') {
+      const val = Nexus.i18n.t(key, vars);
+      if (val !== key || fallback === undefined) return val;
+    }
+    return fallback !== undefined ? fallback : key;
+  }
+
   const RAM_PRESETS = [2048, 3072, 4096, 6144, 8192, 12288];
 
   Nexus.views.ram = function (state) {
@@ -18,22 +26,22 @@
       <div class="page">
         ${settingsTabs('ram')}
         ${pageHead(
-          'MEMORIA JVM',
-          'Configuración de RAM',
-          'Asigna la memoria máxima (-Xmx) e inicial (-Xms) para Minecraft sin ahogar el sistema operativo.'
+          t('ram.eyebrow'),
+          t('ram.title'),
+          t('ram.sub')
         )}
 
         <section class="panel">
           <div class="ram-display">
             <strong id="ram-value" class="tabular">${escapeHtml(formatRam(ramMb))}</strong>
-            <span>asignados a Minecraft (-Xmx)</span>
+            <span>${escapeHtml(t('ram.assigned'))}</span>
           </div>
           <div style="margin:14px 0;">
-            <label class="sr-only" for="ram-range">RAM máxima de Minecraft</label>
+            <label class="sr-only" for="ram-range">${escapeHtml(t('ram.rangeAria'))}</label>
             <input type="range" id="ram-range" min="1024" max="16384" step="512" value="${Math.min(16384, Math.max(1024, ramMb))}">
             <div class="range-labels tabular">
               <span>1 GB</span>
-              <span>4 GB (Recomendado PvP)</span>
+              <span>${escapeHtml(t('ram.recPvp'))}</span>
               <span>8 GB</span>
               <span>16 GB</span>
             </div>
@@ -50,18 +58,18 @@
           <section class="panel">
             <div class="panel-head">
               <div>
-                <h3>Recomendación inteligente para tu equipo</h3>
-                <p>Calculada según tu memoria disponible y la versión activa (${escapeHtml(launch.versionId)}).</p>
+                <h3>${escapeHtml(t('ram.smartTitle'))}</h3>
+                <p>${escapeHtml(t('ram.smartSub', { ver: launch.versionId }))}</p>
               </div>
               <button type="button" class="btn btn-outline-accent btn-sm"
                       data-action="apply-ram-recommendation"
                       data-ram="${escapeHtml(String(rec.recommendedMaxMb))}"
                       data-min-ram="${escapeHtml(String(rec.recommendedMinMb))}">
-                Aplicar recomendado (${escapeHtml(formatRam(rec.recommendedMaxMb))})
+                ${escapeHtml(t('ram.applyRec', { ram: formatRam(rec.recommendedMaxMb) }))}
               </button>
             </div>
             <p class="ram-recommendation">
-              <strong>Sugerido:</strong> ${escapeHtml(formatRam(rec.recommendedMaxMb))} máx. · ${escapeHtml(formatRam(rec.recommendedMinMb))} inicial
+              <strong>${escapeHtml(t('ram.suggested'))}</strong> ${escapeHtml(t('ram.suggestedDetail', { max: formatRam(rec.recommendedMaxMb), min: formatRam(rec.recommendedMinMb) }))}
             </p>
             <ul class="feature-list">
               ${(rec.reasons || []).map((r) => `<li>${escapeHtml(r)}</li>`).join('')}
@@ -71,22 +79,22 @@
         <section class="panel">
           <div class="panel-head">
             <div>
-              <h3>Memoria inicial (-Xms)</h3>
-              <p>Se reserva al arrancar la JVM. Recomendado: 512 MB o 1024 MB.</p>
+              <h3>${escapeHtml(t('ram.minTitle'))}</h3>
+              <p>${escapeHtml(t('ram.minSub'))}</p>
             </div>
           </div>
           <div class="loader-form-grid" style="max-width:420px;">
             <div class="field">
-              <label for="min-ram">RAM inicial (MB)</label>
+              <label for="min-ram">${escapeHtml(t('ram.minLabel'))}</label>
               <input type="number" id="min-ram" min="256" max="8192" step="128" value="${escapeHtml(String(minRamMb))}">
             </div>
             <div>
-              <button type="button" class="btn btn-sm" data-action="save-min-ram">Guardar RAM inicial</button>
+              <button type="button" class="btn btn-sm" data-action="save-min-ram">${escapeHtml(t('ram.saveMin'))}</button>
             </div>
           </div>
         </section>
 
-        ${note('Consejo FPS: en Minecraft Vanilla/Fabric PvP, asignar entre 3 GB y 6 GB es más estable que asignar demasiado heap (evita pausas de recolección largas).')}
+        ${note(t('ram.note'))}
       </div>`;
   };
 })();

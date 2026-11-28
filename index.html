@@ -39,41 +39,44 @@
         </div>
       </div>
 
-      <nav class="nav" aria-label="Navegación principal">
-        <p class="nav-label">JUEGO</p>
-        <button type="button" class="nav-item" data-view="home" aria-label="Inicio" title="Inicio">
-          <span class="nav-icon" data-icon="home"></span><span class="nav-text">Inicio</span>
+      <nav class="nav" aria-label="Navegación principal" data-i18n-aria="shell.navAria">
+        <p class="nav-label" data-i18n="shell.group.game">JUEGO</p>
+        <button type="button" class="nav-item" data-view="home" aria-label="Inicio" title="Inicio" data-i18n-aria="shell.nav.home" data-i18n-title="shell.nav.home">
+          <span class="nav-icon" data-icon="home"></span><span class="nav-text" data-i18n="shell.nav.home">Inicio</span>
         </button>
-        <button type="button" class="nav-item" data-view="versions" aria-label="Versiones" title="Versiones">
-          <span class="nav-icon" data-icon="cube"></span><span class="nav-text">Versiones</span>
+        <button type="button" class="nav-item" data-view="versions" aria-label="Versiones" title="Versiones" data-i18n-aria="shell.nav.versions" data-i18n-title="shell.nav.versions">
+          <span class="nav-icon" data-icon="cube"></span><span class="nav-text" data-i18n="shell.nav.versions">Versiones</span>
         </button>
-        <button type="button" class="nav-item" data-view="mods" aria-label="Mods" title="Mods">
-          <span class="nav-icon" data-icon="puzzle"></span><span class="nav-text">Mods</span>
+        <button type="button" class="nav-item" data-view="mods" aria-label="Mods" title="Mods" data-i18n-aria="shell.nav.mods" data-i18n-title="shell.nav.mods">
+          <span class="nav-icon" data-icon="puzzle"></span><span class="nav-text" data-i18n="shell.nav.mods">Mods</span>
         </button>
-
-        <p class="nav-label">OPTIMIZACIÓN Y PERFIL</p>
-        <button type="button" class="nav-item" data-view="performance" aria-label="Rendimiento y PvP" title="Rendimiento y PvP">
-          <span class="nav-icon" data-icon="bolt"></span><span class="nav-text">Rendimiento y PvP</span>
-        </button>
-        <button type="button" class="nav-item" data-view="players" aria-label="Jugadores" title="Jugadores">
-          <span class="nav-icon" data-icon="user"></span><span class="nav-text">Jugadores</span>
-        </button>
-        <button type="button" class="nav-item" data-view="skins" aria-label="Skins" title="Skins">
-          <span class="nav-icon" data-icon="palette"></span><span class="nav-text">Skins</span>
+        <button type="button" class="nav-item" data-view="resourcepacks" aria-label="Resource Packs" title="Resource Packs" data-i18n-aria="shell.nav.resourcepacks" data-i18n-title="shell.nav.resourcepacks">
+          <span class="nav-icon" data-icon="pack"></span><span class="nav-text" data-i18n="shell.nav.resourcepacks">Resource Packs</span>
         </button>
 
-        <p class="nav-label">SISTEMA</p>
-        <button type="button" class="nav-item" data-view="settings" aria-label="Ajustes" title="Ajustes">
-          <span class="nav-icon" data-icon="gear"></span><span class="nav-text">Ajustes</span>
+        <p class="nav-label" data-i18n="shell.group.opt">OPTIMIZACIÓN Y PERFIL</p>
+        <button type="button" class="nav-item" data-view="performance" aria-label="Rendimiento y PvP" title="Rendimiento y PvP" data-i18n-aria="shell.nav.performance" data-i18n-title="shell.nav.performance">
+          <span class="nav-icon" data-icon="bolt"></span><span class="nav-text" data-i18n="shell.nav.performance">Rendimiento y PvP</span>
+        </button>
+        <button type="button" class="nav-item" data-view="players" aria-label="Jugadores" title="Jugadores" data-i18n-aria="shell.nav.players" data-i18n-title="shell.nav.players">
+          <span class="nav-icon" data-icon="user"></span><span class="nav-text" data-i18n="shell.nav.players">Jugadores</span>
+        </button>
+        <button type="button" class="nav-item" data-view="skins" aria-label="Skins" title="Skins" data-i18n-aria="shell.nav.skins" data-i18n-title="shell.nav.skins">
+          <span class="nav-icon" data-icon="palette"></span><span class="nav-text" data-i18n="shell.nav.skins">Skins</span>
+        </button>
+
+        <p class="nav-label" data-i18n="shell.group.sys">SISTEMA</p>
+        <button type="button" class="nav-item" data-view="settings" aria-label="Ajustes" title="Ajustes" data-i18n-aria="shell.nav.settings" data-i18n-title="shell.nav.settings">
+          <span class="nav-icon" data-icon="gear"></span><span class="nav-text" data-i18n="shell.nav.settings">Ajustes</span>
         </button>
       </nav>
 
       <div class="sidebar-footer">
-        <div class="side-chip" id="account-chip" title="Cuenta activa">
+        <div class="side-chip" id="account-chip" title="Cuenta activa" data-i18n-title="shell.accountChipTitle">
           <span class="nav-icon" data-icon="user"></span>
-          <span class="side-chip-text">Sin sesión</span>
+          <span class="side-chip-text" data-i18n="shell.noSession">Sin sesión</span>
         </div>
-        <div class="side-chip side-chip-accent" id="version-chip" title="Versión seleccionada">
+        <div class="side-chip side-chip-accent" id="version-chip" title="Versión seleccionada" data-i18n-title="shell.versionChipTitle">
           <span class="nav-icon" data-icon="cube"></span>
           <span class="side-chip-text">—</span>
         </div>
@@ -87,10 +90,16 @@
           <h1 id="view-title">Inicio</h1>
         </div>
         <div class="topbar-status">
-          <button type="button" class="btn btn-xs btn-outline-accent topbar-tour-btn" id="btn-start-tour" aria-label="Ver tutorial guiado">
-            <span data-icon="help"></span> Tutorial
+          <button type="button" class="btn btn-xs topbar-lang-btn" id="btn-lang-switch"
+                  title="Cambiar idioma (Español / English)" aria-label="Cambiar idioma (Español / English)"
+                  data-i18n-title="shell.langSwitchTitle" data-i18n-aria="shell.langSwitchTitle">
+            <span data-icon="globe"></span>
+            <span id="lang-switch-text" data-i18n="shell.langBtnLabel">ES / EN</span>
           </button>
-          <span class="status-indicator"><span class="status-dot"></span> Sistema listo</span>
+          <button type="button" class="btn btn-xs btn-outline-accent topbar-tour-btn" id="btn-start-tour" aria-label="Ver tutorial guiado" data-i18n-aria="shell.tutorialAria">
+            <span data-icon="help"></span> <span data-i18n="shell.tutorialBtn">Tutorial</span>
+          </button>
+          <span class="status-indicator"><span class="status-dot"></span> <span data-i18n="shell.systemReady">Sistema listo</span></span>
           <span class="app-version" id="app-version">v0.1.0</span>
         </div>
       </header>
@@ -102,9 +111,11 @@
   <div id="toast-root" class="toast-root" aria-live="polite"></div>
 
   <script defer src="/js/core.js"></script>
+  <script defer src="/js/i18n.js"></script>
   <script defer src="/js/icons.js"></script>
   <script defer src="/js/perf-engine.js"></script>
   <script defer src="/js/mod-inspector.js"></script>
+  <script defer src="/js/resourcepack-inspector.js"></script>
   <script defer src="/js/web-bridge.js"></script>
   <script defer src="/js/api.js"></script>
   <script defer src="/js/views/home.js"></script>
@@ -114,6 +125,7 @@
   <script defer src="/js/views/fabric.js"></script>
   <script defer src="/js/views/forge.js"></script>
   <script defer src="/js/views/mods.js"></script>
+  <script defer src="/js/views/resourcepacks.js"></script>
   <script defer src="/js/views/new-install.js"></script>
   <script defer src="/js/views/installations.js"></script>
   <script defer src="/js/views/folders.js"></script>

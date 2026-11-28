@@ -4,10 +4,20 @@
   const Nexus = (window.Nexus = window.Nexus || {});
   const STORAGE_KEY = 'pan_launcher_tour_v1';
 
+  function tr(key, vars, fallback) {
+    if (Nexus.i18n && typeof Nexus.i18n.t === 'function') {
+      return Nexus.i18n.t(key, vars);
+    }
+    return String(fallback || key);
+  }
+
   const STEPS = Object.freeze([
     {
       id: 'play',
       selector: '[data-action="play"]',
+      titleKey: 'tour.step.play.title',
+      descKey: 'tour.step.play.desc',
+      tipKey: 'tour.step.play.tip',
       title: '1. Botón JUGAR',
       description: 'Es el botón principal para abrir Minecraft. Cuando tengas tu versión instalada y un jugador elegido, se activará en dorado.',
       tip: 'Si algo falta antes de jugar, justo debajo verás botones directos para solucionarlo en un clic.',
@@ -17,6 +27,9 @@
     {
       id: 'versions',
       selector: '.nav-item[data-view="versions"]',
+      titleKey: 'tour.step.versions.title',
+      descKey: 'tour.step.versions.desc',
+      tipKey: 'tour.step.versions.tip',
       title: '2. Versiones oficiales',
       description: 'Aquí descargas cualquier versión de Minecraft Java (como 1.21.4, 1.20.1 o 26.3) directamente desde Mojang.',
       tip: 'Pulsa «Instalar» en la versión que quieras y luego «Elegir» para usarla al jugar.',
@@ -26,15 +39,21 @@
     {
       id: 'loader',
       selector: '[data-tour="home-loader"]',
+      titleKey: 'tour.step.loader.title',
+      descKey: 'tour.step.loader.desc',
+      tipKey: 'tour.step.loader.tip',
       title: '3. Cargador (Vanilla o con Mods)',
       description: 'Deja «Vanilla» para jugar normal sin mods. Si quieres usar mods .jar, elige Fabric, Forge, NeoForge o Quilt.',
-      tip: 'Tu configuración, idioma y servidores se guardan aunque cambies de versión o cargador.',
+      tip: 'Tu configuración, idioma, resource packs y servidores se guardan aunque cambies de versión o cargador.',
       placement: 'top',
       view: 'home'
     },
     {
       id: 'mods',
       selector: '.nav-item[data-view="mods"]',
+      titleKey: 'tour.step.mods.title',
+      descKey: 'tour.step.mods.desc',
+      tipKey: 'tour.step.mods.tip',
       title: '4. Arrastrar tus Mods (.jar)',
       description: 'Entra aquí y arrastra tus archivos .jar. Se aplican solos al iniciar y te avisan antes de jugar si alguno no es compatible.',
       tip: 'Si un mod da conflicto con tu versión, podrás desactivarlo al instante desde el aviso.',
@@ -42,9 +61,24 @@
       view: 'home'
     },
     {
+      id: 'resourcepacks',
+      selector: '.nav-item[data-view="resourcepacks"]',
+      titleKey: 'tour.step.resourcepacks.title',
+      descKey: 'tour.step.resourcepacks.desc',
+      tipKey: 'tour.step.resourcepacks.tip',
+      title: '5. Resource Packs (.zip)',
+      description: 'Justo debajo de Mods puedes arrastrar tus packs de texturas (.zip) y activarlos con un clic. Se aplican solos al juego.',
+      tip: 'El launcher revisa si el pack coincide con tu versión de Minecraft y lo añade a options.txt al abrir.',
+      placement: 'right',
+      view: 'home'
+    },
+    {
       id: 'players',
       selector: '.nav-item[data-view="players"]',
-      title: '5. Cuenta Microsoft o Modo Offline',
+      titleKey: 'tour.step.players.title',
+      descKey: 'tour.step.players.desc',
+      tipKey: 'tour.step.players.tip',
+      title: '6. Cuenta Microsoft o Modo Offline',
       description: 'Inicia sesión con tu cuenta oficial de Microsoft (Online) o crea un nombre gratis sin cuenta (Modo Offline) en segundos.',
       tip: 'El modo Offline funciona al instante para servidores no-premium o mundos locales.',
       placement: 'right',
@@ -53,7 +87,10 @@
     {
       id: 'performance',
       selector: '[data-tour="home-perf"]',
-      title: '6. Modo PvP y Ultra FPS',
+      titleKey: 'tour.step.performance.title',
+      descKey: 'tour.step.performance.desc',
+      tipKey: 'tour.step.performance.tip',
+      title: '7. Modo PvP y Ultra FPS',
       description: 'Elige con un clic cómo quieres que rinda el juego: PvP Competitivo, Ultra FPS (máximo rendimiento), Survival o Normal.',
       tip: 'Puedes ajustar más opciones o exportar tu pack en «Rendimiento y PvP».',
       placement: 'top',
@@ -62,7 +99,10 @@
     {
       id: 'skins',
       selector: '.nav-item[data-view="skins"]',
-      title: '7. Skins 3D',
+      titleKey: 'tour.step.skins.title',
+      descKey: 'tour.step.skins.desc',
+      tipKey: 'tour.step.skins.tip',
+      title: '8. Skins 3D',
       description: 'Elige o importa cualquier archivo .png para cambiar tu personaje y previsualizarlo en 3D antes de entrar a jugar.',
       tip: 'Compatible tanto con cuentas Microsoft como con perfiles Offline.',
       placement: 'right',
@@ -71,9 +111,12 @@
     {
       id: 'close-and-settings',
       selector: '[data-action="cycle-close-behavior"]',
-      title: '8. Cerrar launcher al jugar y Ajustes',
+      titleKey: 'tour.step.close.title',
+      descKey: 'tour.step.close.desc',
+      tipKey: 'tour.step.close.tip',
+      title: '9. Cerrar al jugar, Tutorial e Idioma',
       description: 'Cierra Pan Launcher mientras juegas para ahorrar memoria RAM; al salir de Minecraft, volverá a aparecer solo.',
-      tip: '¿Quieres volver a ver esta guía más adelante? Pulsa «? Tutorial» arriba o abre Ajustes.',
+      tip: 'Arriba siempre tienes los botones de Idioma (ES/EN) y «? Tutorial» por si quieres cambiar idioma o repetir la guía.',
       placement: 'bottom',
       view: 'home'
     }
@@ -263,22 +306,31 @@
     const popover = layerEl.querySelector('.pan-tour-popover');
     if (!popover) return;
 
+    const stepBadge = tr('tour.stepBadge', { current: activeIndex + 1, total: STEPS.length }, `Guía rápida · Paso ${activeIndex + 1} de ${STEPS.length}`);
+    const skipText = tr('tour.skip', null, 'Saltar ✕');
+    const closeAria = tr('tour.closeAria', null, 'Cerrar presentación');
+    const prevText = tr('tour.prev', null, '← Anterior');
+    const nextText = isLast ? tr('tour.finish', null, '¡Listo, empezar!') : tr('tour.next', null, 'Siguiente →');
+    const stepTitle = tr(step.titleKey, null, step.title);
+    const stepDesc = tr(step.descKey, null, step.description);
+    const stepTip = step.tipKey ? tr(step.tipKey, null, step.tip) : step.tip;
+
     popover.innerHTML = `
       <div class="pan-tour-arrow" aria-hidden="true"></div>
       <div class="pan-tour-head">
-        <span class="badge badge-release">Guía rápida · Paso ${activeIndex + 1} de ${STEPS.length}</span>
-        <button type="button" class="btn btn-xs btn-ghost pan-tour-close" data-tour-action="skip" aria-label="Cerrar presentación">Saltar ✕</button>
+        <span class="badge badge-release">${escapeHtml(stepBadge)}</span>
+        <button type="button" class="btn btn-xs btn-ghost pan-tour-close" data-tour-action="skip" aria-label="${escapeHtml(closeAria)}">${escapeHtml(skipText)}</button>
       </div>
-      <h3 id="pan-tour-title">${escapeHtml(step.title)}</h3>
-      <p class="pan-tour-desc">${escapeHtml(step.description)}</p>
-      ${step.tip ? `<p class="pan-tour-tip">${escapeHtml(step.tip)}</p>` : ''}
+      <h3 id="pan-tour-title">${escapeHtml(stepTitle)}</h3>
+      <p class="pan-tour-desc">${escapeHtml(stepDesc)}</p>
+      ${stepTip ? `<p class="pan-tour-tip">${escapeHtml(stepTip)}</p>` : ''}
       <div class="pan-tour-dots" aria-hidden="true">
         ${STEPS.map((s, idx) => `<span class="pan-tour-dot${idx === activeIndex ? ' active' : idx < activeIndex ? ' done' : ''}"></span>`).join('')}
       </div>
       <div class="pan-tour-actions">
-        <button type="button" class="btn btn-sm" data-tour-action="prev" ${isFirst ? 'disabled' : ''}>← Anterior</button>
+        <button type="button" class="btn btn-sm" data-tour-action="prev" ${isFirst ? 'disabled' : ''}>${escapeHtml(prevText)}</button>
         <button type="button" class="btn btn-primary btn-sm" data-tour-action="${isLast ? 'finish' : 'next'}">
-          ${isLast ? '¡Listo, empezar!' : 'Siguiente →'}
+          ${escapeHtml(nextText)}
         </button>
       </div>`;
 
@@ -377,6 +429,7 @@
     start,
     stop,
     reposition: () => positionStep(false),
-    isActive: () => Boolean(layerEl)
+    isActive: () => Boolean(layerEl),
+    getActiveIndex: () => activeIndex
   });
 })();

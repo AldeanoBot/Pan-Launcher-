@@ -4,21 +4,30 @@
   const Nexus = (window.Nexus = window.Nexus || {});
   const { hydrateIcons } = Nexus.utils;
 
-  const VIEW_TITLES = Object.freeze({
-    home: 'Inicio',
-    versions: 'Versiones de Minecraft',
-    mods: 'Mods personalizados (.jar)',
-    newInstall: 'Nueva instalación',
-    folders: 'Carpetas del perfil',
-    fabric: 'Instalación de Fabric',
-    forge: 'Forge y NeoForge',
-    performance: 'Rendimiento y modo PvP',
-    skins: 'Administrador de skins',
-    ram: 'Configuración de RAM',
-    java: 'Configuración de Java',
-    accounts: 'Cuentas Microsoft',
-    players: 'Modo y jugadores',
-    settings: 'Configuración general'
+  function tr(key, fallback) {
+    if (Nexus.i18n && typeof Nexus.i18n.t === 'function') {
+      const v = Nexus.i18n.t(key);
+      if (v !== key || !fallback) return v;
+    }
+    return String(fallback || key);
+  }
+
+  const VIEW_TITLE_KEYS = Object.freeze({
+    home: 'view.home',
+    versions: 'view.versions',
+    mods: 'view.mods',
+    resourcepacks: 'view.resourcepacks',
+    newInstall: 'view.newInstall',
+    folders: 'view.folders',
+    fabric: 'view.fabric',
+    forge: 'view.forge',
+    performance: 'view.performance',
+    skins: 'view.skins',
+    ram: 'view.ram',
+    java: 'view.java',
+    accounts: 'view.accounts',
+    players: 'view.players',
+    settings: 'view.settings'
   });
 
   // Las sub-secciones comparten la entrada principal correspondiente del sidebar.
@@ -26,6 +35,7 @@
     home: 'home',
     versions: 'versions',
     mods: 'mods',
+    resourcepacks: 'resourcepacks',
     newInstall: 'mods',
     folders: 'mods',
     performance: 'performance',
@@ -46,14 +56,14 @@
       .replace(/^#\/?/, '')
       .split('/')[0];
     if (name === 'installations') return 'mods';
-    return Object.prototype.hasOwnProperty.call(VIEW_TITLES, name) ? name : 'home';
+    return Object.prototype.hasOwnProperty.call(VIEW_TITLE_KEYS, name) ? name : 'home';
   }
 
   function render() {
     current = normalize(window.location.hash);
 
     const title = document.getElementById('view-title');
-    if (title) title.textContent = VIEW_TITLES[current];
+    if (title) title.textContent = tr(VIEW_TITLE_KEYS[current], current);
 
     document.querySelectorAll('.nav-item[data-view]').forEach((button) => {
       const active = button.getAttribute('data-view') === NAV_FOR_VIEW[current];
@@ -71,7 +81,7 @@
 
     const renderView = Nexus.views && Nexus.views[current];
     if (typeof renderView !== 'function' || !Nexus.state) {
-      root.innerHTML = '<div class="error-state"><h2>Vista no disponible</h2><p>La interfaz no se ha inicializado correctamente.</p></div>';
+      root.innerHTML = `<div class="error-state"><h2>${Nexus.utils.escapeHtml(tr('shell.viewUnavailableTitle', 'Vista no disponible'))}</h2><p>${Nexus.utils.escapeHtml(tr('shell.viewUnavailableDesc', 'La interfaz no se ha inicializado correctamente.'))}</p></div>`;
       return;
     }
 
@@ -83,14 +93,14 @@
 
   function init() {
     window.addEventListener('hashchange', render);
-    if (!Object.prototype.hasOwnProperty.call(VIEW_TITLES, normalize(window.location.hash))) {
+    if (!Object.prototype.hasOwnProperty.call(VIEW_TITLE_KEYS, normalize(window.location.hash))) {
       window.location.replace('#/home');
     }
     render();
   }
 
   function navigate(view) {
-    if (!Object.prototype.hasOwnProperty.call(VIEW_TITLES, view)) return;
+    if (!Object.prototype.hasOwnProperty.call(VIEW_TITLE_KEYS, view)) return;
     if (window.location.hash === `#/${view}`) render();
     else window.location.hash = `#/${view}`;
   }

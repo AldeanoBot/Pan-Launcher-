@@ -106,16 +106,144 @@ interface PingResult {
   error?: string;
 }
 
+const MAX_SLP_BUFFER_BYTES = 65536;
+
+function isSafeHostname(host: string): boolean {
+  if (!host || host.length > 253) return false;
+  if (!/^[a-zA-Z0-9.-]+$/.test(host)) return false;
+  if (host.startsWith('.') || host.endsWith('.') || host.includes('..')) return false;
+  return true;
+}
+
+function isBlockedIpv4Num(n: number): boolean {
+  const a = (n >>> 24) & 0xff;
+  const b = (n >>> 16) & 0xff;
+  const c = (n >>> 8) & 0xff;
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 198 && (b === 18 || b === 19)) return true;
+  if (a === 198 && b === 51 && c === 100) return true;
+  if (a === 203 && b === 0 && c === 113) return true;
+  if (a >= 224) return true;
+  return false;
+}
+
+function parseIpv4Int(ip: string): number | null {
+  const parts = ip.split('.');
+  if (parts.length !== 4) return null;
+  let val = 0;
+  for (const p of parts) {
+    if (!/^\d{1,3}$/.test(p)) return null;
+    const oct = Number.parseInt(p, 10);
+    if (oct < 0 || oct > 255) return null;
+    val = ((val << 8) | oct) >>> 0;
+  }
+  return val;
+}
+
+function isBlockedIp(rawIp: string): boolean {
+  const ip = String(rawIp || '').split('%')[0].trim().toLowerCase();
+  const ver = net.isIP(ip);
+  if (ver === 4) {
+    const num = parseIpv4Int(ip);
+    return num === null ? true : isBlockedIpv4Num(num);
+  }
+  if (ver === 6) {
+    if (ip === '::' || ip === '::1') return true;
+    const v4Mapped = ip.match(/^::(?:ffff:)?(\d+\.\d+\.\d+\.\d+)$/i);
+    if (v4Mapped) {
+      const num = parseIpv4Int(v4Mapped[1]);
+      return num === null ? true : isBlockedIpv4Num(num);
+    }
+    const v4HexMapped = ip.match(/^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
+    if (v4HexMapped) {
+      const hi = Number.parseInt(v4HexMapped[1], 16);
+      const lo = Number.parseInt(v4HexMapped[2], 16);
+      const num = ((hi << 16) | lo) >>> 0;
+      return isBlockedIpv4Num(num);
+    }
+    if (ip.startsWith('64:ff9b::')) return true;
+    if (ip.startsWith('fc') || ip.startsWith('fd')) return true;
+    if (/^fe[89ab][0-9a-f]:/i.test(ip) || /^fe[89ab]:/i.test(ip)) return true;
+    if (ip.startsWith('ff')) return true;
+    return false;
+  }
+  return true;
+}
+
+async function resolvePublicMinecraftTarget(
+  host: string
+): Promise<{ address: string; family: 4 | 6 } | null> {
+  if (net.isIP(host)) {
+    if (isBlockedIp(host)) return null;
+    return { address: host, family: net.isIP(host) as 4 | 6 };
+  }
+  try {
+    const records = await Promise.race([
+      dns.lookup(host, { all: true }),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('DNS timeout')), 1500)),
+    ]);
+    if (!Array.isArray(records) || records.length === 0) return null;
+    for (const rec of records) {
+      if (!rec?.address || isBlockedIp(rec.address)) {
+        return null;
+      }
+    }
+    const first = records[0];
+    return {
+      address: first.address,
+      family: first.family === 6 ? 6 : 4,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function pingMinecraftServer(rawAddress: string): Promise<PingResult> {
   const trimmed = rawAddress.trim();
+  const colonCount = (trimmed.match(/:/g) || []).length;
+  if (!trimmed || trimmed.length > 260 || colonCount > 1) {
+    return {
+      online: false,
+      host: trimmed,
+      port: 25565,
+      latencyMs: null,
+      playersOnline: null,
+      playersMax: null,
+      versionName: null,
+      motd: null,
+      checkedAt: new Date().toISOString(),
+      error: 'Dirección IP o dominio inválido',
+    };
+  }
   const [hostPart, portPart] = trimmed.split(':');
   let host = hostPart || '';
-  let port = portPart ? Number.parseInt(portPart, 10) : 25565;
-  if (!Number.isFinite(port) || port < 1 || port > 65535) {
-    port = 25565;
+  let port = portPart !== undefined ? Number.parseInt(portPart, 10) : 25565;
+  if (
+    (portPart !== undefined && !/^\d{1,5}$/.test(portPart)) ||
+    !Number.isFinite(port) ||
+    port < 1 ||
+    port > 65535
+  ) {
+    return {
+      online: false,
+      host: hostPart || trimmed,
+      port: 25565,
+      latencyMs: null,
+      playersOnline: null,
+      playersMax: null,
+      versionName: null,
+      motd: null,
+      checkedAt: new Date().toISOString(),
+      error: 'Puerto de servidor no válido',
+    };
   }
 
-  if (!host || !/^[a-zA-Z0-9.-]+$/.test(host)) {
+  if (!isSafeHostname(host)) {
     return {
       online: false,
       host: trimmed,
@@ -130,20 +258,40 @@ async function pingMinecraftServer(rawAddress: string): Promise<PingResult> {
     };
   }
 
-  // Try SRV lookup when no explicit port was given
-  if (!portPart) {
+  // Try SRV lookup when no explicit port was given and host is not a numeric IP
+  if (portPart === undefined && !net.isIP(host)) {
     try {
       const srv = await Promise.race([
         dns.resolveSrv(`_minecraft._tcp.${host}`),
         new Promise<never>((_, rej) => setTimeout(() => rej(new Error('SRV timeout')), 700)),
       ]);
       if (srv && srv.length > 0) {
-        host = srv[0].name;
-        port = srv[0].port;
+        const srvHost = String(srv[0].name || '').replace(/\.$/, '');
+        const srvPort = Number(srv[0].port);
+        if (isSafeHostname(srvHost) && Number.isInteger(srvPort) && srvPort >= 1 && srvPort <= 65535) {
+          host = srvHost;
+          port = srvPort;
+        }
       }
     } catch {
       // Ignore SRV failure and connect directly
     }
+  }
+
+  const target = await resolvePublicMinecraftTarget(host);
+  if (!target) {
+    return {
+      online: false,
+      host: hostPart,
+      port,
+      latencyMs: null,
+      playersOnline: null,
+      playersMax: null,
+      versionName: null,
+      motd: null,
+      checkedAt: new Date().toISOString(),
+      error: 'Dirección de servidor no permitida o no resoluble',
+    };
   }
 
   return new Promise((resolve) => {
@@ -191,7 +339,7 @@ async function pingMinecraftServer(rawAddress: string): Promise<PingResult> {
       });
     });
 
-    socket.connect(port, host, () => {
+    socket.connect({ host: target.address, port, family: target.family }, () => {
       const protocolVersion = writeVarInt(767);
       const hostBytes = Buffer.from(host, 'utf8');
       const hostLen = writeVarInt(hostBytes.length);
@@ -207,6 +355,21 @@ async function pingMinecraftServer(rawAddress: string): Promise<PingResult> {
     });
 
     socket.on('data', (chunk) => {
+      if (recvBuffer.length + chunk.length > MAX_SLP_BUFFER_BYTES) {
+        finish({
+          online: false,
+          host: hostPart,
+          port,
+          latencyMs: null,
+          playersOnline: null,
+          playersMax: null,
+          versionName: null,
+          motd: null,
+          checkedAt: new Date().toISOString(),
+          error: 'Respuesta de protocolo demasiado grande',
+        });
+        return;
+      }
       recvBuffer = Buffer.concat([recvBuffer, chunk]);
       try {
         const packetLength = readVarInt(recvBuffer, 0);
@@ -233,8 +396,9 @@ async function pingMinecraftServer(rawAddress: string): Promise<PingResult> {
         }
         cursor += packetId.length;
         const jsonLen = readVarInt(recvBuffer, cursor);
-        if (!jsonLen) return;
+        if (!jsonLen || jsonLen.value < 0 || jsonLen.value > MAX_SLP_BUFFER_BYTES) return;
         cursor += jsonLen.length;
+        if (cursor + jsonLen.value > recvBuffer.length) return;
         const jsonStr = recvBuffer.subarray(cursor, cursor + jsonLen.value).toString('utf8');
         const parsed = JSON.parse(jsonStr);
         const latencyMs = Math.max(1, Date.now() - startTime);
@@ -388,16 +552,24 @@ async function getPanLoaderCatalog(
         'application/json',
         6500
       );
-      if (!resp.ok) throw new Error(`Error HTTP ${resp.status} en meta.fabricmc.net`);
-      items = mapFabricLoaderItems(await resp.json(), gameVersion);
+      if (resp.status === 400 || resp.status === 404) {
+        items = [];
+      } else {
+        if (!resp.ok) throw new Error(`Error HTTP ${resp.status} en meta.fabricmc.net`);
+        items = mapFabricLoaderItems(await resp.json(), gameVersion);
+      }
     } else if (loader === 'quilt') {
       const resp = await fetchWithTimeout(
         `https://meta.quiltmc.org/v3/versions/loader/${encodeURIComponent(gameVersion)}`,
         'application/json',
         6500
       );
-      if (!resp.ok) throw new Error(`Error HTTP ${resp.status} en meta.quiltmc.org`);
-      items = mapQuiltLoaderItems(await resp.json(), gameVersion);
+      if (resp.status === 400 || resp.status === 404) {
+        items = [];
+      } else {
+        if (!resp.ok) throw new Error(`Error HTTP ${resp.status} en meta.quiltmc.org`);
+        items = mapQuiltLoaderItems(await resp.json(), gameVersion);
+      }
     } else if (loader === 'forge') {
       const resp = await fetchWithTimeout(
         'https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml',
@@ -446,7 +618,21 @@ async function getPanLoaderCatalog(
 
 async function startServer() {
   const app = express();
-  app.use(express.json());
+  app.disable('x-powered-by');
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+    next();
+  });
+  app.use(express.json({ limit: '1mb' }));
+  app.use((err: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (err && typeof err === 'object' && 'type' in err) {
+      res.status(400).json({ error: 'Cuerpo JSON no válido o demasiado grande' });
+      return;
+    }
+    next(err);
+  });
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, service: 'pan-launcher-api', canLaunchJava: false });
@@ -731,20 +917,37 @@ async function startServer() {
   }
 
   app.post('/api/mc/resolve-mods', async (req, res) => {
-    const modIds = Array.isArray(req.body?.modIds) ? req.body.modIds.map(String) : [];
-    const mcVersion = typeof req.body?.mcVersion === 'string' ? req.body.mcVersion : '1.21.4';
-    const loader = typeof req.body?.loader === 'string' ? req.body.loader : 'Fabric';
+    const rawModIds: unknown[] = Array.isArray(req.body?.modIds) ? req.body.modIds : [];
+    const modIds = rawModIds.slice(0, 32).map((v) => String(v)).filter((id: string) => /^[a-z0-9_-]{1,40}$/i.test(id));
+    const rawMcVer = typeof req.body?.mcVersion === 'string' ? req.body.mcVersion.trim() : '1.21.4';
+    const mcVersion = /^[A-Za-z0-9._+-]{1,64}$/.test(rawMcVer) ? rawMcVer : '1.21.4';
+    const rawLoader = typeof req.body?.loader === 'string' ? req.body.loader.trim() : 'Fabric';
+    const allowedLoaders = new Set(['vanilla', 'fabric', 'forge', 'neoforge', 'quilt']);
+    const loader = allowedLoaders.has(rawLoader.toLowerCase()) ? rawLoader : 'Fabric';
     const resolved = await resolveModsFromModrinth(modIds, mcVersion, loader);
     res.json({ mcVersion, loader, mods: resolved });
   });
 
   app.post('/api/mc/export-mrpack', async (req, res) => {
-    const modIds = Array.isArray(req.body?.modIds) ? req.body.modIds.map(String) : [];
-    const mcVersion = typeof req.body?.mcVersion === 'string' ? req.body.mcVersion : '1.21.4';
-    const loader = typeof req.body?.loader === 'string' ? req.body.loader : 'Fabric';
-    const profileName = typeof req.body?.profileName === 'string' ? req.body.profileName : 'Pan-launcher';
-    const optionsTxt = typeof req.body?.optionsTxt === 'string' ? req.body.optionsTxt : '';
-    const jvmArgs = typeof req.body?.jvmArgs === 'string' ? req.body.jvmArgs : '';
+    const rawModIds: unknown[] = Array.isArray(req.body?.modIds) ? req.body.modIds : [];
+    const modIds = rawModIds.slice(0, 32).map((v) => String(v)).filter((id: string) => /^[a-z0-9_-]{1,40}$/i.test(id));
+    const rawMcVer = typeof req.body?.mcVersion === 'string' ? req.body.mcVersion.trim() : '1.21.4';
+    if (!/^[A-Za-z0-9._+-]{1,64}$/.test(rawMcVer)) {
+      res.status(400).json({ error: 'Versión de Minecraft no válida' });
+      return;
+    }
+    const mcVersion = rawMcVer;
+    const rawLoader = typeof req.body?.loader === 'string' ? req.body.loader.trim() : 'Fabric';
+    const allowedLoaders = new Set(['vanilla', 'fabric', 'forge', 'neoforge', 'quilt']);
+    if (!allowedLoaders.has(rawLoader.toLowerCase())) {
+      res.status(400).json({ error: 'Loader no válido' });
+      return;
+    }
+    const loader = rawLoader;
+    const rawProfileName = typeof req.body?.profileName === 'string' ? req.body.profileName : 'Pan-launcher';
+    const profileName = rawProfileName.replace(/[\x00-\x1F\x7F]/g, '').trim().slice(0, 80) || 'Pan-launcher';
+    const optionsTxt = typeof req.body?.optionsTxt === 'string' ? req.body.optionsTxt.slice(0, 65536) : '';
+    const jvmArgs = typeof req.body?.jvmArgs === 'string' ? req.body.jvmArgs.slice(0, 16384) : '';
 
     const resolved = await resolveModsFromModrinth(modIds, mcVersion, loader);
     const dependencies: Record<string, string> = { minecraft: mcVersion };
@@ -755,7 +958,7 @@ async function startServer() {
       dependencies['forge'] = '54.1.0';
     } else if (lowLoader === 'quilt') {
       dependencies['quilt-loader'] = '0.28.0';
-    } else {
+    } else if (lowLoader === 'fabric') {
       dependencies['fabric-loader'] = '0.16.10';
     }
 
@@ -788,11 +991,9 @@ async function startServer() {
     }
 
     const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    const safeVer = mcVersion.replace(/[^a-zA-Z0-9._-]/g, '') || 'pack';
     res.setHeader('Content-Type', 'application/x-modrinth-modpack+zip');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="Pan-launcher-${mcVersion.replace(/[^a-zA-Z0-9._-]/g, '')}.mrpack"`
-    );
+    res.setHeader('Content-Disposition', `attachment; filename="Pan-launcher-${safeVer}.mrpack"`);
     res.send(buffer);
   });
 

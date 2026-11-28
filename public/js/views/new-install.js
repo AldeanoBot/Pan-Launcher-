@@ -6,17 +6,25 @@
 
   Nexus.views = Nexus.views || {};
 
+  function t(key, vars, fallback) {
+    if (Nexus.i18n && typeof Nexus.i18n.t === 'function') {
+      const val = Nexus.i18n.t(key, vars);
+      if (val !== key || fallback === undefined) return val;
+    }
+    return fallback !== undefined ? fallback : key;
+  }
+
   Nexus.views.newInstallVersionList = function (state) {
     const form = state.newInstall || {};
     const q = String(form.search || '').trim().toLowerCase();
     const cat = form.category || 'all';
 
     const categories = [
-      { id: 'all', label: 'Todas' },
-      { id: 'release', label: 'Oficiales' },
-      { id: 'snapshot', label: 'Snapshots' },
-      { id: 'beta', label: 'Beta' },
-      { id: 'alpha', label: 'Alpha' }
+      { id: 'all', label: t('newInstall.cat.all') },
+      { id: 'release', label: t('newInstall.cat.release') },
+      { id: 'snapshot', label: t('newInstall.cat.snapshot') },
+      { id: 'beta', label: t('newInstall.cat.beta') },
+      { id: 'alpha', label: t('newInstall.cat.alpha') }
     ];
 
     const filtered = (state.versions || []).filter((ver) => {
@@ -38,28 +46,37 @@
                   data-action="new-install-category" data-category="${c.id}">${escapeHtml(c.label)}</button>`).join('')}
       </div>
 
-      <div class="version-picker" role="listbox" aria-label="Versiones disponibles">
+      <div class="version-picker" role="listbox" aria-label="${escapeHtml(t('newInstall.availableAria'))}">
         ${visible.length
           ? visible.map((ver) => {
               const selected = ver.id === form.gameVersion;
               const reqJava = requiredJavaForVersion(ver.id);
+              const verTypeLabel = ver.type === 'release'
+                ? t('versions.type.release')
+                : ver.type === 'snapshot'
+                  ? t('versions.type.snapshot')
+                  : ver.type === 'old_beta'
+                    ? t('versions.type.old_beta')
+                    : ver.type === 'old_alpha'
+                      ? t('versions.type.old_alpha')
+                      : ver.type;
               return `
                 <button type="button" class="version-pick${selected ? ' selected' : ''}"
                         data-action="new-install-pick-version" data-version-id="${escapeHtml(ver.id)}">
                   <strong>${escapeHtml(ver.id)}</strong>
                   <span class="version-pick-meta">
-                    <span>${escapeHtml(ver.type === 'release' ? 'Release' : ver.type)}</span>
+                    <span>${escapeHtml(verTypeLabel)}</span>
                     <span>J${reqJava}</span>
                   </span>
                 </button>`;
             }).join('')
-          : '<p class="muted" style="padding:12px;">Sin versiones que coincidan.</p>'}
+          : `<p class="muted" style="padding:12px;">${escapeHtml(t('newInstall.noMatch'))}</p>`}
       </div>
 
       ${filtered.length > visible.length ? `
         <div class="load-more">
           <button type="button" class="btn btn-xs" data-action="new-install-show-more">
-            Ver más (${escapeHtml(String(visible.length))} / ${escapeHtml(String(filtered.length))})
+            ${escapeHtml(t('newInstall.showMore', { vis: visible.length, total: filtered.length }))}
           </button>
         </div>` : ''}`;
   };
@@ -82,7 +99,7 @@
     return `
       <div class="form-stack">
         <div class="field">
-          <label>Cargador de mods (para ${escapeHtml(form.gameVersion || '—')} · requiere Java ${reqJava})</label>
+          <label>${escapeHtml(t('newInstall.loaderLabel', { ver: form.gameVersion || '—', java: reqJava }))}</label>
           <div class="filter-group">
             ${loaders.map((l) => `
               <button type="button" class="filter-chip${form.loader === l.id ? ' active' : ''}"
@@ -93,46 +110,46 @@
         ${form.loader !== 'vanilla' ? `
           <div class="field">
             <div class="panel-head" style="margin-bottom:4px;">
-              <label for="new-install-loader-version">Versión de ${escapeHtml(form.loader)}</label>
+              <label for="new-install-loader-version">${escapeHtml(t('newInstall.loaderVerLabel', { loader: form.loader }))}</label>
               <button type="button" class="btn btn-xs" data-action="new-install-refresh-catalog">
-                <span data-icon="refresh"></span> Refrescar
+                <span data-icon="refresh"></span> ${escapeHtml(t('folders.refresh'))}
               </button>
             </div>
             ${form.catalogError ? `<p class="field-error">${escapeHtml(form.catalogError)}</p>` : ''}
             ${form.catalogWarning ? `<p class="field-hint">${escapeHtml(form.catalogWarning)}</p>` : ''}
             <select id="new-install-loader-version" ${form.catalogState === 'loading' || !visibleCatalog.length ? 'disabled' : ''}>
               ${form.catalogState === 'loading'
-                ? '<option value="">Cargando catálogo…</option>'
+                ? `<option value="">${escapeHtml(t('newInstall.loadingCatalog'))}</option>`
                 : visibleCatalog.length
-                  ? visibleCatalog.map((item) => `<option value="${escapeHtml(item.id)}"${form.loaderVersion === item.id ? ' selected' : ''}>${escapeHtml(item.label)}${item.stable ? ' (Estable)' : ''}</option>`).join('')
-                  : '<option value="">No disponible para esta versión</option>'}
+                  ? visibleCatalog.map((item) => `<option value="${escapeHtml(item.id)}"${form.loaderVersion === item.id ? ' selected' : ''}>${escapeHtml(item.label)}${item.stable ? ` (${escapeHtml(t('loaderBar.stable'))})` : ''}</option>`).join('')
+                  : `<option value="">${escapeHtml(t('newInstall.unavailable'))}</option>`}
             </select>
             ${catalog.length > visibleCatalog.length ? `
-              <button type="button" class="btn btn-xs" data-action="new-install-show-more-loaders">Ver más versiones de cargador</button>` : ''}
+              <button type="button" class="btn btn-xs" data-action="new-install-show-more-loaders">${escapeHtml(t('newInstall.showMoreLoaders'))}</button>` : ''}
           </div>` : ''}
 
         <div class="loader-form-grid">
           <div class="field">
-            <label for="new-install-ram">RAM máxima (MB)</label>
+            <label for="new-install-ram">${escapeHtml(t('newInstall.ramMaxLabel'))}</label>
             <input type="number" id="new-install-ram" min="1024" max="16384" step="512" value="${escapeHtml(String(form.ramMb || 4096))}">
           </div>
           <div class="field">
-            <label for="new-install-min-ram">RAM inicial (MB)</label>
+            <label for="new-install-min-ram">${escapeHtml(t('newInstall.ramMinLabel'))}</label>
             <input type="number" id="new-install-min-ram" min="256" max="8192" step="256" value="${escapeHtml(String(form.minRamMb || 512))}">
           </div>
         </div>
 
         <div class="field">
-          <label for="new-install-java">Runtime Java (opcional)</label>
+          <label for="new-install-java">${escapeHtml(t('newInstall.javaLabel'))}</label>
           <select id="new-install-java">
-            <option value="">Automático (Java ${reqJava} recomendado para ${escapeHtml(form.gameVersion || 'esta versión')})</option>
+            <option value="">${escapeHtml(t('newInstall.javaAutoOpt', { java: reqJava, ver: form.gameVersion || t('newInstall.javaFallbackVer') }))}</option>
             ${javaList.map((j) => `<option value="${escapeHtml(j.path)}"${form.javaPath === j.path ? ' selected' : ''}>Java ${escapeHtml(String(j.major))} (${escapeHtml(j.version)}) — ${escapeHtml(j.path)}</option>`).join('')}
           </select>
         </div>
 
         <div class="wizard-actions">
-          <button type="button" class="btn btn-sm" data-action="navigate" data-view="installations">Cancelar</button>
-          <button type="button" class="btn btn-primary" data-action="new-install-create">Crear e instalar</button>
+          <button type="button" class="btn btn-sm" data-action="navigate" data-view="installations">${escapeHtml(t('newInstall.cancelBtn'))}</button>
+          <button type="button" class="btn btn-primary" data-action="new-install-create">${escapeHtml(t('newInstall.createBtn'))}</button>
         </div>
       </div>`;
   };
@@ -142,23 +159,23 @@
     return `
       <div class="page">
         ${pageHead(
-          'INSTALACIONES AISLADAS',
-          'Nueva instalación',
-          'Crea un perfil independiente con su propia carpeta .minecraft, mods, loader, RAM y runtime Java.'
+          t('newInstall.eyebrow'),
+          t('newInstall.title'),
+          t('newInstall.sub')
         )}
 
         <div class="new-install-layout">
           <section class="panel">
             <div class="field">
-              <label for="new-install-name">Nombre de la instalación</label>
-              <input type="text" id="new-install-name" maxlength="40" placeholder="Ej. PanSMP 26.3 PvP" value="${escapeHtml(form.name || '')}">
+              <label for="new-install-name">${escapeHtml(t('newInstall.nameLabel'))}</label>
+              <input type="text" id="new-install-name" maxlength="40" placeholder="${escapeHtml(t('newInstall.namePh'))}" value="${escapeHtml(form.name || '')}">
             </div>
 
             <div class="field new-install-field">
-              <label for="new-install-search">Versión de Minecraft</label>
+              <label for="new-install-search">${escapeHtml(t('newInstall.mcVerLabel'))}</label>
               <div class="search-box" style="max-width:none;">
                 <span data-icon="search"></span>
-                <input type="text" id="new-install-search" placeholder="Filtrar versión (ej. 26.3, 1.21.4)..." value="${escapeHtml(form.search || '')}">
+                <input type="text" id="new-install-search" placeholder="${escapeHtml(t('newInstall.searchPh'))}" value="${escapeHtml(form.search || '')}">
               </div>
               <div id="new-install-version-list">${Nexus.views.newInstallVersionList(state)}</div>
             </div>

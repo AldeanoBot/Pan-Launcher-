@@ -3,6 +3,14 @@
 
   const Nexus = (window.Nexus = window.Nexus || {});
 
+  function tr(key, vars, fallback) {
+    if (Nexus.i18n && typeof Nexus.i18n.t === 'function') {
+      const translated = Nexus.i18n.t(key, vars);
+      if (translated !== key || !fallback) return translated;
+    }
+    return String(fallback || key);
+  }
+
   function escapeHtml(value) {
     return String(value === undefined || value === null ? '' : value)
       .replace(/&/g, '&amp;')
@@ -39,7 +47,10 @@
     if (!iso) return '—';
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return '—';
-    return d.toLocaleDateString('es-ES', { year: 'numeric', month: 'short', day: 'numeric' });
+    const locale = Nexus.i18n && typeof Nexus.i18n.getLang === 'function' && Nexus.i18n.getLang() === 'en'
+      ? 'en-US'
+      : 'es-ES';
+    return d.toLocaleDateString(locale, { year: 'numeric', month: 'short', day: 'numeric' });
   }
 
   function requiredJavaForVersion(versionId) {
@@ -86,25 +97,26 @@
   }
 
   const SETTINGS_TABS = Object.freeze([
-    { view: 'settings', label: 'General', icon: 'gear' },
-    { view: 'ram', label: 'Memoria RAM', icon: 'ram' },
-    { view: 'java', label: 'Java', icon: 'java' },
-    { view: 'accounts', label: 'Microsoft', icon: 'user' },
-    { view: 'fabric', label: 'Fabric', icon: 'puzzle' },
-    { view: 'forge', label: 'Forge / NeoForge', icon: 'hammer' }
+    { view: 'settings', labelKey: 'tabs.settings', fallback: 'General', icon: 'gear' },
+    { view: 'ram', labelKey: 'tabs.ram', fallback: 'Memoria RAM', icon: 'ram' },
+    { view: 'java', labelKey: 'tabs.java', fallback: 'Java', icon: 'java' },
+    { view: 'accounts', labelKey: 'tabs.accounts', fallback: 'Microsoft', icon: 'user' },
+    { view: 'fabric', labelKey: 'tabs.fabric', fallback: 'Fabric', icon: 'puzzle' },
+    { view: 'forge', labelKey: 'tabs.forge', fallback: 'Forge / NeoForge', icon: 'hammer' }
   ]);
 
   function settingsTabs(activeView) {
     return `
-      <div class="settings-tabs" role="tablist" aria-label="Subsecciones de configuración">
+      <div class="settings-tabs" role="tablist" aria-label="${escapeHtml(tr('tabs.aria', null, 'Subsecciones de configuración'))}">
         ${SETTINGS_TABS.map((tab) => {
           const isActive = tab.view === activeView;
+          const label = tr(tab.labelKey, null, tab.fallback);
           return `
             <button type="button" class="settings-tab${isActive ? ' active' : ''}"
                     role="tab" aria-selected="${isActive}"
                     data-action="navigate" data-view="${tab.view}">
               <span class="nav-icon" data-icon="${tab.icon}"></span>
-              <span>${escapeHtml(tab.label)}</span>
+              <span>${escapeHtml(label)}</span>
             </button>`;
         }).join('')}
       </div>`;
@@ -141,6 +153,74 @@
     }, 3600);
   }
 
+  function confirmModal(options) {
+    const opts = options || {};
+    if (typeof document === 'undefined' || !document.body) {
+      return Promise.resolve(false);
+    }
+    const existing = document.getElementById('pan-confirm-modal');
+    if (existing) existing.remove();
+
+    const title = opts.title || tr('confirm.title', null, 'Confirmar acción');
+    const message = opts.message || '';
+    const cancelLabel = opts.cancelLabel || tr('confirm.cancel', null, 'Cancelar');
+    const confirmLabel = opts.confirmLabel || tr('confirm.confirm', null, 'Eliminar');
+    const confirmClass = opts.danger === false ? 'btn btn-primary btn-sm' : 'btn btn-danger btn-sm';
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const overlay = document.createElement('div');
+      overlay.id = 'pan-confirm-modal';
+      overlay.className = 'pan-modal-backdrop';
+      overlay.setAttribute('role', 'dialog');
+      overlay.setAttribute('aria-modal', 'true');
+      overlay.setAttribute('aria-labelledby', 'pan-confirm-title');
+
+      overlay.innerHTML = `
+        <div class="pan-modal pan-confirm-modal">
+          <div class="pan-modal-head">
+            <h3 id="pan-confirm-title">${escapeHtml(title)}</h3>
+            <button type="button" class="btn btn-xs" data-confirm-choice="cancel" aria-label="${escapeHtml(cancelLabel)}">✕</button>
+          </div>
+          <p class="pan-modal-subtitle">${escapeHtml(message)}</p>
+          <div class="pan-modal-actions">
+            <button type="button" class="${confirmClass}" data-confirm-choice="confirm">${escapeHtml(confirmLabel)}</button>
+            <button type="button" class="btn btn-sm" data-confirm-choice="cancel">${escapeHtml(cancelLabel)}</button>
+          </div>
+        </div>`;
+
+      const cleanup = (accepted) => {
+        if (settled) return;
+        settled = true;
+        document.removeEventListener('keydown', onKeyDown);
+        overlay.remove();
+        resolve(Boolean(accepted));
+      };
+
+      const onKeyDown = (ev) => {
+        if (ev.key === 'Escape') {
+          ev.preventDefault();
+          cleanup(false);
+        }
+      };
+
+      document.addEventListener('keydown', onKeyDown);
+      overlay.addEventListener('click', (ev) => {
+        if (ev.target === overlay) {
+          cleanup(false);
+          return;
+        }
+        const btn = ev.target.closest('[data-confirm-choice]');
+        if (!btn) return;
+        cleanup(btn.getAttribute('data-confirm-choice') === 'confirm');
+      });
+
+      document.body.appendChild(overlay);
+      const cancelBtn = overlay.querySelector('[data-confirm-choice="cancel"]');
+      if (cancelBtn && typeof cancelBtn.focus === 'function') cancelBtn.focus();
+    });
+  }
+
   Nexus.utils = Object.freeze({
     escapeHtml,
     formatRam,
@@ -151,6 +231,7 @@
     pageHead,
     settingsTabs,
     hydrateIcons,
-    toast
+    toast,
+    confirmModal
   });
 })();

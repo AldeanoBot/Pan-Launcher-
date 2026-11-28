@@ -102,6 +102,19 @@
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-3${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
   }
 
+  function tr(key, vars, fallback) {
+    const i18n = window.Nexus && window.Nexus.i18n;
+    if (i18n && typeof i18n.t === 'function') {
+      const translated = i18n.t(key, vars);
+      if (translated !== key || !fallback) return translated;
+    }
+    if (!fallback) return key;
+    if (!vars) return fallback;
+    return String(fallback).replace(/\{([A-Za-z0-9_]+)\}/g, (full, k) => (
+      Object.prototype.hasOwnProperty.call(vars, k) && vars[k] !== undefined && vars[k] !== null ? String(vars[k]) : full
+    ));
+  }
+
   function defaultStore() {
     return {
       config: clone(DEFAULT_CONFIG),
@@ -111,6 +124,7 @@
       locals: [],
       skinsLocal: [],
       customMods: [],
+      resourcePacks: [],
       skinOverrides: {},
       optionsPresets: {},
       lastInstallResult: null,
@@ -151,6 +165,7 @@
         locals: Array.isArray(parsed && parsed.locals) ? parsed.locals : [],
         skinsLocal: Array.isArray(parsed && parsed.skinsLocal) ? parsed.skinsLocal : [],
         customMods: Array.isArray(parsed && parsed.customMods) ? parsed.customMods : [],
+        resourcePacks: Array.isArray(parsed && parsed.resourcePacks) ? parsed.resourcePacks : [],
         skinOverrides: (parsed && parsed.skinOverrides) || {},
         optionsPresets: (parsed && parsed.optionsPresets) || {}
       };
@@ -206,6 +221,60 @@
     }
   }
   saveStore();
+
+  // IndexedDB binary store para resource packs (.zip) en modo web
+  const RPACK_DB_NAME = 'pan_launcher_rpacks_db';
+  const RPACK_STORE_NAME = 'packs';
+
+  function openRpackDb() {
+    return new Promise((resolve, reject) => {
+      if (typeof window === 'undefined' || !window.indexedDB) {
+        resolve(null);
+        return;
+      }
+      const req = window.indexedDB.open(RPACK_DB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(RPACK_STORE_NAME)) {
+          db.createObjectStore(RPACK_STORE_NAME);
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error('IndexedDB error'));
+    });
+  }
+
+  async function rpackStorePut(id, buffer) {
+    try {
+      const db = await openRpackDb();
+      if (!db) return;
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(RPACK_STORE_NAME, 'readwrite');
+        tx.objectStore(RPACK_STORE_NAME).put(buffer, id);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+      db.close();
+    } catch {
+      // Ignore IndexedDB quota errors gracefully
+    }
+  }
+
+  async function rpackStoreDelete(id) {
+    try {
+      const db = await openRpackDb();
+      if (!db) return;
+      await new Promise((resolve) => {
+        const tx = db.transaction(RPACK_STORE_NAME, 'readwrite');
+        tx.objectStore(RPACK_STORE_NAME).delete(id);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      });
+      db.close();
+    } catch {
+      // Ignore
+    }
+  }
 
   // Bus de eventos simple
   const listeners = {
@@ -669,7 +738,7 @@
   }
 
   const microsoftDesktopError = () =>
-    new Error('El inicio de sesión OAuth de Microsoft requiere la aplicación de escritorio. Para probar aquí, cambia a Modo Offline en Jugadores.');
+    new Error(tr('bridge.msDesktopOnly', null, 'El inicio de sesión OAuth de Microsoft requiere la aplicación de escritorio. Para probar aquí, cambia a Modo Offline en Jugadores.'));
 
   window.nexus = Object.freeze({
     info: Object.freeze({
@@ -741,27 +810,7 @@
             `/api/pan/catalog/${encodeURIComponent(kind)}/${encodeURIComponent(gv)}${force ? '?force=true' : ''}`
           );
         } catch {
-          if (kind === 'fabric') {
-            try {
-              const resp = await fetch(`https://meta.fabricmc.net/v2/versions/loader/${encodeURIComponent(gv)}`);
-              if (resp.ok) {
-                const list = await resp.json();
-                return {
-                  items: (Array.isArray(list) ? list : []).map((row) => ({
-                    id: row.loader && row.loader.version,
-                    stable: Boolean(row.loader && row.loader.stable)
-                  })).filter((x) => x.id),
-                  loader: 'fabric',
-                  gameVersion: gv,
-                  stale: false,
-                  source: 'fabric-meta'
-                };
-              }
-            } catch {
-              // ignore
-            }
-          }
-          return { items: [], loader: kind, gameVersion: gv, stale: true, warning: 'Sin catálogo remoto disponible.', source: 'cache' };
+          return { items: [], loader: kind, gameVersion: gv, stale: true, warning: '', source: 'cache' };
         }
       }
     }),
@@ -1405,22 +1454,22 @@
           reasons.push({
             code: 'not-installed',
             message: activeInst
-              ? `La instalación "${activeInst.name}" aún no está instalada (estado: ${activeInst.installStatus}).`
-              : `Instala la versión ${versionId} desde Versiones antes de jugar.`
+              ? tr('bridge.reqNotInstalledInst', { name: activeInst.name, status: activeInst.installStatus }, `La instalación "${activeInst.name}" aún no está instalada (estado: ${activeInst.installStatus}).`)
+              : tr('bridge.reqNotInstalledVer', { ver: versionId }, `Instala la versión ${versionId} desde Versiones antes de jugar.`)
           });
         }
         if (!authenticated) {
           reasons.push({
             code: 'auth',
             message: mode === 'offline'
-              ? 'Crea o selecciona un perfil local en Jugadores para poder iniciar.'
-              : 'Inicia sesión con Microsoft en Cuentas o activa el Modo Offline en Jugadores.'
+              ? tr('bridge.reqAuthOffline', null, 'Crea o selecciona un perfil local en Jugadores para poder iniciar.')
+              : tr('bridge.reqAuthOnline', null, 'Inicia sesión con Microsoft en Cuentas o activa el Modo Offline en Jugadores.')
           });
         }
         const ramMb = activeInst ? activeInst.ramMb : store.config.launch.ramMb;
         const minRamMb = activeInst ? activeInst.minRamMb : store.config.launch.minRamMb;
         if (!(minRamMb > 0 && ramMb >= 1024 && minRamMb < ramMb)) {
-          reasons.push({ code: 'ram', message: 'La memoria inicial debe ser menor que la RAM máxima configurada.' });
+          reasons.push({ code: 'ram', message: tr('bridge.reqRamInvalid', null, 'La memoria inicial debe ser menor que la RAM máxima configurada.') });
         }
 
         return {
@@ -1441,7 +1490,7 @@
       start: async () => {
         const preflight = await window.nexus.launch.preflight();
         if (!preflight.ready) {
-          throw new Error((preflight.reasons[0] && preflight.reasons[0].message) || 'Faltan requisitos para iniciar.');
+          throw new Error((preflight.reasons[0] && preflight.reasons[0].message) || tr('msg.reqsMissing', null, 'Faltan requisitos para iniciar.'));
         }
 
         const health = await checkLocalHostHealth();
@@ -1449,9 +1498,9 @@
           launchState.versionId = preflight.versionId;
           launchState.status = 'error';
           launchState.active = null;
-          launchState.error = 'Para abrir Minecraft Java real descarga e inicia Pan Launcher (.exe/.zip en Windows o .sh en Linux) desde Ajustes.';
-          addLaunchLine('info', `[Pan] Preflight correcto: ${preflight.versionId} (${preflight.mode === 'offline' ? 'Offline' : 'Online'} · ${preflight.profile.name})`);
-          addLaunchLine('stderr', '[Pan] Vista previa web: descarga la app de escritorio en Ajustes para iniciar el proceso JVM local.');
+          launchState.error = tr('bridge.webLaunchNeedsApp', null, 'Para abrir Minecraft Java real descarga e inicia Pan Launcher (.exe/.zip en Windows o .sh en Linux) desde Ajustes.');
+          addLaunchLine('info', `[Pan] Preflight OK: ${preflight.versionId} (${preflight.mode === 'offline' ? 'Offline' : 'Online'} · ${preflight.profile.name})`);
+          addLaunchLine('stderr', '[Pan] Web preview mode: download the desktop app in Settings to start local Java.');
           emit(listeners.launchStatus, clone(launchState));
           throw new Error(launchState.error);
         }
@@ -1487,6 +1536,15 @@
           : (store.customMods || [])
               .filter((m) => m && m.enabled && m.filename)
               .map((m) => String(m.filename));
+        const enabledResourcePacks = (store.resourcePacks || [])
+          .filter((p) => p && p.enabled && p.filename)
+          .map((p) => String(p.filename));
+        const rpackInspector = window.Nexus && window.Nexus.resourcePackInspector;
+        const baseOptionsTxt = perfEval ? perfEval.optionsTxt : '';
+        const mergedOptionsTxt = rpackInspector && typeof rpackInspector.applyResourcePacksToOptionsTxt === 'function'
+          ? rpackInspector.applyResourcePacksToOptionsTxt(baseOptionsTxt, enabledResourcePacks, mcVersion)
+          : baseOptionsTxt;
+
         const payload = {
           profileId: (activeInst && activeInst.id) || (perfEval && perfEval.presetId) || 'default',
           profileName: (activeInst && activeInst.name) || (perfEval && perfEval.presetName) || 'Pan Launcher',
@@ -1505,7 +1563,8 @@
           accountType: preflight.mode === 'offline' ? 'offline' : 'msa',
           enabledModIds,
           customModFiles,
-          optionsTxt: perfEval ? perfEval.optionsTxt : ''
+          enabledResourcePacks,
+          optionsTxt: mergedOptionsTxt
         };
 
         const launchResp = await fetch('/api/local/launch', {
@@ -1738,6 +1797,7 @@
                 source: 'filename'
               };
 
+          let savedFilename = filename;
           if (health.canLaunchJava) {
             const upResp = await fetch(`/api/local/mods/upload?filename=${encodeURIComponent(filename)}`, {
               method: 'POST',
@@ -1748,12 +1808,13 @@
             if (!upResp.ok || !upJson.ok) {
               throw new Error(upJson.error || `No se pudo guardar ${filename} en la carpeta local.`);
             }
+            if (upJson.filename) savedFilename = String(upJson.filename);
           }
 
-          const existingIdx = store.customMods.findIndex((m) => m.filename === filename);
+          const existingIdx = store.customMods.findIndex((m) => m.filename === savedFilename);
           const entry = {
             id: existingIdx >= 0 ? store.customMods[existingIdx].id : randomId('mod'),
-            filename,
+            filename: savedFilename,
             modId: meta.modId,
             name: meta.name,
             version: meta.version,
@@ -1821,10 +1882,202 @@
         if (!health.canLaunchJava) {
           return {
             ok: false,
-            error: 'En la vista previa web no existe carpeta local; arrastra tus .jar directamente a esta pantalla.'
+            error: tr('bridge.modsOpenWebErr', null, 'En la vista previa web no existe carpeta local; arrastra tus .jar directamente a esta pantalla.')
           };
         }
         const resp = await fetch('/api/local/mods/open-folder', { method: 'POST' });
+        return resp.json().catch(() => ({ ok: true }));
+      }
+    }),
+    resourcePacks: Object.freeze({
+      list: async () => {
+        const health = await checkLocalHostHealth();
+        if (health.canLaunchJava) {
+          try {
+            const resp = await apiFetchJson('/api/local/resourcepacks');
+            const diskFiles = Array.isArray(resp.files) ? resp.files : [];
+            const diskMap = new Map(diskFiles.map((f) => [String(f.filename), Number(f.size) || 0]));
+            let changed = false;
+
+            const filtered = store.resourcePacks.filter((p) => {
+              const keep = diskMap.has(String(p.filename));
+              if (!keep) changed = true;
+              return keep;
+            });
+            store.resourcePacks = filtered;
+
+            const knownNames = new Set(store.resourcePacks.map((p) => String(p.filename)));
+            const inspector = window.Nexus && window.Nexus.resourcePackInspector;
+            for (const f of diskFiles) {
+              const fname = String(f.filename || '');
+              if (!fname || knownNames.has(fname)) continue;
+              let meta = {
+                name: fname.replace(/\.zip$/i, ''),
+                description: '',
+                packFormat: null,
+                hasMcmeta: false,
+                iconDataUrl: ''
+              };
+              try {
+                const fileResp = await fetch(`/api/local/resourcepacks/file?filename=${encodeURIComponent(fname)}`, { cache: 'no-store' });
+                if (fileResp.ok && inspector) {
+                  const buf = await fileResp.arrayBuffer();
+                  meta = await inspector.inspectResourcePackBuffer(buf, fname);
+                }
+              } catch {
+                // fallback to filename metadata
+              }
+              store.resourcePacks.unshift({
+                id: randomId('rpack'),
+                filename: fname,
+                name: meta.name || fname.replace(/\.zip$/i, ''),
+                description: meta.description || '',
+                packFormat: meta.packFormat !== undefined ? meta.packFormat : null,
+                minFormat: meta.minFormat !== undefined ? meta.minFormat : (meta.packFormat !== undefined ? meta.packFormat : null),
+                maxFormat: meta.maxFormat !== undefined ? meta.maxFormat : (meta.packFormat !== undefined ? meta.packFormat : null),
+                mcVersionRangeLabel: meta.mcVersionRangeLabel || '—',
+                hasMcmeta: Boolean(meta.hasMcmeta),
+                iconDataUrl: meta.iconDataUrl || '',
+                size: Number(f.size) || 0,
+                enabled: true,
+                addedAt: new Date().toISOString()
+              });
+              changed = true;
+            }
+            if (changed) saveStore();
+          } catch {
+            // Keep cached metadata if local host query failed transiently
+          }
+        }
+        return clone(store.resourcePacks);
+      },
+      addFiles: async (fileList) => {
+        const files = Array.from(fileList || []);
+        const inspector = window.Nexus && window.Nexus.resourcePackInspector;
+        const health = await checkLocalHostHealth();
+        let added = 0;
+        let skipped = 0;
+        const errors = [];
+
+        for (const file of files) {
+          const rawName = String((file && file.name) || '');
+          if (!rawName.toLowerCase().endsWith('.zip')) {
+            skipped += 1;
+            errors.push(tr('rpack.err.notZip', { name: rawName || 'file' }, `"${rawName || 'archivo'}" no es un archivo .zip válido.`));
+            continue;
+          }
+          if (file.size > 64 * 1024 * 1024) {
+            skipped += 1;
+            errors.push(tr('rpack.err.tooLarge', { name: rawName }, `"${rawName}" supera el límite de 64 MB.`));
+            continue;
+          }
+          const buf = await file.arrayBuffer();
+          const bytes = new Uint8Array(buf);
+          if (bytes.length < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
+            skipped += 1;
+            errors.push(tr('rpack.err.invalidZip', { name: rawName }, `"${rawName}" no tiene una cabecera ZIP válida.`));
+            continue;
+          }
+
+          const filename = inspector ? inspector.sanitizeResourcePackFilename(rawName) : rawName.replace(/[^A-Za-z0-9._+-]/g, '_');
+          const meta = inspector
+            ? await inspector.inspectResourcePackBuffer(buf, filename)
+            : { name: filename.replace(/\.zip$/i, ''), description: '', packFormat: null, minFormat: null, maxFormat: null, mcVersionRangeLabel: '—', hasMcmeta: false, iconDataUrl: '' };
+
+          let savedFilename = filename;
+          if (health.canLaunchJava) {
+            const upResp = await fetch(`/api/local/resourcepacks/upload?filename=${encodeURIComponent(filename)}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/octet-stream' },
+              body: buf
+            });
+            const upJson = await upResp.json().catch(() => ({}));
+            if (!upResp.ok || !upJson.ok) {
+              throw new Error(upJson.error || tr('rpack.err.saveFailed', { name: filename }, `No se pudo guardar ${filename} en la carpeta local.`));
+            }
+            if (upJson.filename) savedFilename = String(upJson.filename);
+          }
+
+          const existingIdx = store.resourcePacks.findIndex((p) => p.filename === savedFilename);
+          const id = existingIdx >= 0 ? store.resourcePacks[existingIdx].id : randomId('rpack');
+          await rpackStorePut(id, buf);
+
+          const entry = {
+            id,
+            filename: savedFilename,
+            name: meta.name || savedFilename.replace(/\.zip$/i, ''),
+            description: meta.description || '',
+            packFormat: meta.packFormat !== undefined ? meta.packFormat : null,
+            minFormat: meta.minFormat !== undefined ? meta.minFormat : (meta.packFormat !== undefined ? meta.packFormat : null),
+            maxFormat: meta.maxFormat !== undefined ? meta.maxFormat : (meta.packFormat !== undefined ? meta.packFormat : null),
+            mcVersionRangeLabel: meta.mcVersionRangeLabel || '—',
+            hasMcmeta: Boolean(meta.hasMcmeta),
+            iconDataUrl: meta.iconDataUrl || '',
+            size: file.size || buf.byteLength,
+            enabled: true,
+            addedAt: new Date().toISOString()
+          };
+          if (existingIdx >= 0) {
+            store.resourcePacks.splice(existingIdx, 1);
+          }
+          store.resourcePacks.unshift(entry);
+          added += 1;
+        }
+        saveStore();
+        return { added, skipped, errors, items: clone(store.resourcePacks) };
+      },
+      toggle: async (id, enabled) => {
+        const target = store.resourcePacks.find((p) => p.id === id);
+        if (!target) throw new Error(tr('rpack.err.notFound', null, 'Resource pack no encontrado.'));
+        target.enabled = Boolean(enabled);
+        saveStore();
+        return clone(store.resourcePacks);
+      },
+      remove: async (id) => {
+        const idx = store.resourcePacks.findIndex((p) => p.id === id);
+        if (idx < 0) return clone(store.resourcePacks);
+        const [removed] = store.resourcePacks.splice(idx, 1);
+        saveStore();
+        await rpackStoreDelete(id);
+        const health = await checkLocalHostHealth();
+        if (health.canLaunchJava && removed && removed.filename) {
+          try {
+            await fetch('/api/local/resourcepacks/delete', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ filename: removed.filename })
+            });
+          } catch {
+            // Ignore unlink error
+          }
+        }
+        return clone(store.resourcePacks);
+      },
+      disableIncompatible: async (mcVersion) => {
+        const inspector = window.Nexus && window.Nexus.resourcePackInspector;
+        let disabledCount = 0;
+        if (inspector) {
+          for (const pack of store.resourcePacks) {
+            if (!pack || !pack.enabled) continue;
+            const res = inspector.evaluateResourcePackCompatibility(pack, mcVersion);
+            if (!res.compatible) {
+              pack.enabled = false;
+              disabledCount += 1;
+            }
+          }
+          if (disabledCount > 0) saveStore();
+        }
+        return { disabledCount, items: clone(store.resourcePacks) };
+      },
+      openFolder: async () => {
+        const health = await checkLocalHostHealth();
+        if (!health.canLaunchJava) {
+          return {
+            ok: false,
+            error: tr('rpack.err.openFolderWeb', null, 'En la vista previa web no existe carpeta local; arrastra tus .zip directamente a esta pantalla.')
+          };
+        }
+        const resp = await fetch('/api/local/resourcepacks/open-folder', { method: 'POST' });
         return resp.json().catch(() => ({ ok: true }));
       }
     })

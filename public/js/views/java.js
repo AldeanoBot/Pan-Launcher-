@@ -6,6 +6,14 @@
 
   Nexus.views = Nexus.views || {};
 
+  function t(key, vars, fallback) {
+    if (Nexus.i18n && typeof Nexus.i18n.t === 'function') {
+      const val = Nexus.i18n.t(key, vars);
+      if (val !== key || fallback === undefined) return val;
+    }
+    return fallback !== undefined ? fallback : key;
+  }
+
   Nexus.views.java = function (state) {
     const launch = state.config.launch || {};
     const activeInst = ((state.installations && state.installations.list) || [])
@@ -20,27 +28,31 @@
       <div class="page">
         ${settingsTabs('java')}
         ${pageHead(
-          'ENTORNO DE EJECUCIÓN',
-          'Configuración de Java',
-          'Pan Launcher selecciona automáticamente Java 25 para Minecraft 26.x, Java 21 para 1.20.5–1.21.x, Java 17 para 1.17–1.20.4 y Java 8 para 1.16.5 o inferior.',
+          t('java.eyebrow'),
+          t('java.title'),
+          t('java.sub'),
           `<button type="button" class="btn btn-sm" data-action="detect-java">
-             <span data-icon="refresh"></span> Detectar Java en el sistema
+             <span data-icon="refresh"></span> ${escapeHtml(t('java.detectBtn'))}
            </button>`
         )}
 
         <section class="panel">
           <div class="panel-head">
             <div>
-              <h3>Versión activa: ${escapeHtml(versionId)}</h3>
-              <p>Requiere <strong>Java ${escapeHtml(String(reqMajor))}+</strong> para iniciarse correctamente.</p>
+              <h3>${escapeHtml(t('java.activeVer', { ver: versionId }))}</h3>
+              <p>${t('java.requires', { major: escapeHtml(String(reqMajor)) })}</p>
             </div>
             <span class="badge badge-release">Java ${escapeHtml(String(reqMajor))}+</span>
           </div>
 
           ${selected ? `
             <p class="java-selected">
-              <strong>Runtime seleccionado:</strong> Java ${escapeHtml(String(selected.major))} (${escapeHtml(selected.version)}) — <code>${escapeHtml(selected.path)}</code>
-            </p>` : '<p class="java-warning">No se encontró un runtime compatible automático; indica la ruta manual a java.exe o javaw.exe abajo.</p>'}
+              ${t('java.selectedRuntime', {
+                major: escapeHtml(String(selected.major)),
+                ver: escapeHtml(selected.version),
+                path: escapeHtml(selected.path)
+              })}
+            </p>` : `<p class="java-warning">${escapeHtml(t('java.missingRuntime'))}</p>`}
 
           ${jStatus.error ? `<p class="java-error" style="margin-top:8px;">${escapeHtml(jStatus.error)}</p>` : ''}
         </section>
@@ -48,17 +60,17 @@
         <section class="panel">
           <div class="panel-head">
             <div>
-              <h3>Ruta manual de Java (opcional)</h3>
-              <p>Si ya tienes Java 25 instalado (Temurin / Oracle / Zulu / GraalVM) y quieres forzar su ejecutable, indícalo aquí.</p>
+              <h3>${escapeHtml(t('java.manualTitle'))}</h3>
+              <p>${escapeHtml(t('java.manualSub'))}</p>
             </div>
           </div>
           <div class="form-stack" style="max-width:640px;">
             <div class="field">
-              <label for="java-path">Ruta a java.exe / javaw.exe (deja vacío para auto-selección)</label>
-              <input type="text" id="java-path" placeholder="Ej. C:\\Program Files\\Eclipse Adoptium\\jdk-25\\bin\\javaw.exe" value="${escapeHtml(launch.javaPath || '')}">
+              <label for="java-path">${escapeHtml(t('java.pathLabel'))}</label>
+              <input type="text" id="java-path" placeholder="C:\\Program Files\\Eclipse Adoptium\\jdk-25\\bin\\javaw.exe" value="${escapeHtml(launch.javaPath || '')}">
             </div>
             <div class="preset-row">
-              <button type="button" class="btn btn-primary btn-sm" data-action="save-java">Guardar ruta Java</button>
+              <button type="button" class="btn btn-primary btn-sm" data-action="save-java">${escapeHtml(t('java.savePath'))}</button>
             </div>
           </div>
         </section>
@@ -66,8 +78,8 @@
         <section class="panel">
           <div class="panel-head">
             <div>
-              <h3>Runtimes detectados (${escapeHtml(String(installations.length))})</h3>
-              <p>Java 25+ usa ZGC generacional nativo automáticamente (sin el flag obsoleto -XX:+ZGenerational).</p>
+              <h3>${escapeHtml(t('java.detectedTitle', { count: installations.length }))}</h3>
+              <p>${escapeHtml(t('java.detectedSub'))}</p>
             </div>
           </div>
           ${installations.length
@@ -76,13 +88,13 @@
                    <li>
                      <strong>Java ${escapeHtml(String(inst.major))}</strong> (${escapeHtml(inst.version || '—')}) —
                      <code>${escapeHtml(inst.path)}</code>
-                     <span class="badge">${escapeHtml(inst.source || 'Sistema')}</span>
+                     <span class="badge">${escapeHtml(inst.source || t('java.systemSource'))}</span>
                    </li>`).join('')}
                </ul>`
-            : '<p class="muted">Pulsa «Detectar Java en el sistema» para volver a escanear.</p>'}
+            : `<p class="muted">${escapeHtml(t('java.emptyDetected'))}</p>`}
         </section>
 
-        ${note('Las versiones 26.1 / 26.2 / 26.3 de Minecraft exigen Java 25 en su manifiesto oficial. Pan Launcher no bloquea rutas manuales y adapta automáticamente los flags JVM para Java 25.')}
+        ${note(t('java.note'))}
       </div>`;
   };
 })();

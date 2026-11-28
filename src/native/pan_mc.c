@@ -1041,6 +1041,34 @@ static void cpmap_free(PanCpMap* m) {
   m->cap = 0;
 }
 
+static int is_safe_rel_path_a(const char* rel) {
+  if (!rel || !rel[0] || rel[0] == '/' || rel[0] == '\\' ||
+      strstr(rel, "..") != NULL || strchr(rel, ':') != NULL) {
+    return 0;
+  }
+  return 1;
+}
+
+static int is_safe_version_token_a(const char* val) {
+  if (!val || !val[0]) return 0;
+  size_t len = strlen(val);
+  if (len == 0 || len > 64 || strstr(val, "..") != NULL) return 0;
+  unsigned char first = (unsigned char)val[0];
+  if (!isalnum(first)) return 0;
+  for (size_t i = 0; val[i]; i++) {
+    unsigned char c = (unsigned char)val[i];
+    if (!(isalnum(c) || c == '.' || c == '_' || c == '+' || c == '-')) return 0;
+  }
+  return 1;
+}
+
+static int is_legacy_pack_mc_version_a(const char* mc_ver) {
+  if (!mc_ver) return 0;
+  if (strncmp(mc_ver, "1.", 2) != 0) return 0;
+  int minor = atoi(mc_ver + 2);
+  return minor > 0 && minor <= 12;
+}
+
 static int extract_full_zip_cb(
     const char* name,
     const uint8_t* data,
@@ -1051,14 +1079,19 @@ static int extract_full_zip_cb(
   (void)idx;
   (void)total;
   const wchar_t* target_dir = (const wchar_t*)user;
+  if (!is_safe_rel_path_a(name)) return 0;
   wchar_t wrel[512];
   if (!utf8_to_wide(name, wrel, 512)) return 0;
   for (int i = 0; wrel[i]; i++) {
     if (wrel[i] == L'/') wrel[i] = L'\\';
   }
-  wchar_t dest[MAX_PATH];
-  if (_snwprintf(dest, MAX_PATH, L"%ls\\%ls", target_dir, wrel) >= MAX_PATH) return 0;
-  dest[MAX_PATH - 1] = L'\0';
+  wchar_t raw_dest[MAX_PATH], canon_base[MAX_PATH], dest[MAX_PATH];
+  if (_snwprintf(raw_dest, MAX_PATH, L"%ls\\%ls", target_dir, wrel) >= MAX_PATH) return 0;
+  raw_dest[MAX_PATH - 1] = L'\0';
+  DWORD bl = GetFullPathNameW(target_dir, MAX_PATH, canon_base, NULL);
+  DWORD dl = GetFullPathNameW(raw_dest, MAX_PATH, dest, NULL);
+  if (bl == 0 || bl >= MAX_PATH || dl == 0 || dl >= MAX_PATH) return 0;
+  if (_wcsnicmp(dest, canon_base, bl) != 0 || (dest[bl] != L'\\' && dest[bl] != L'\0')) return 0;
   return write_entire_file_w(dest, data, data_len);
 }
 
@@ -1718,6 +1751,95 @@ static void merge_options_txt_w(const wchar_t* opt_path, const char* new_txt) {
   strlist_free(&lines);
 }
 
+static void merge_resource_packs_w(const wchar_t* opt_path, const PanJsonValue* arr, const char* mc_ver) {
+  if (!arr || arr->type != PAN_JSON_ARRAY) return;
+  int legacy = is_legacy_pack_mc_version_a(mc_ver);
+
+  size_t rp_cap = 8192;
+  char* rp_line = (char*)malloc(rp_cap);
+  if (!rp_line) return;
+  size_t pos = 0;
+  pos += (size_t)_snprintf(rp_line + pos, rp_cap - pos, "resourcePacks:[%s", legacy ? "" : "\"vanilla\"");
+  int entry_cnt = legacy ? 0 : 1;
+
+  for (size_t i = 0; i < arr->u.arr.count; i++) {
+    const char* raw_fn = pan_json_str(arr->u.arr.items[i], NULL);
+    if (!raw_fn || !raw_fn[0]) continue;
+    if (strstr(raw_fn, "..") || strchr(raw_fn, '/') || strchr(raw_fn, '\\') ||
+        strchr(raw_fn, '"') || strchr(raw_fn, '\n') || strchr(raw_fn, '\r')) {
+      continue;
+    }
+    char entry_buf[540];
+    if (legacy) _snprintf(entry_buf, sizeof(entry_buf), "\"%s\"", raw_fn);
+    else _snprintf(entry_buf, sizeof(entry_buf), "\"file/%s\"", raw_fn);
+    entry_buf[sizeof(entry_buf) - 1] = '\0';
+    size_t elen = strlen(entry_buf);
+    if (pos + elen + 16 < rp_cap) {
+      if (entry_cnt > 0) rp_line[pos++] = ',';
+      memcpy(rp_line + pos, entry_buf, elen);
+      pos += elen;
+      entry_cnt++;
+    }
+  }
+  rp_line[pos++] = ']';
+  rp_line[pos] = '\0';
+
+  PanStrList lines = {0};
+  size_t ex_len = 0;
+  uint8_t* ex_raw = read_entire_file_w(opt_path, &ex_len);
+  int replaced = 0;
+  int has_incompat = 0;
+  if (ex_raw && ex_len > 0) {
+    char* ex_str = (char*)malloc(ex_len + 1);
+    if (ex_str) {
+      memcpy(ex_str, ex_raw, ex_len);
+      ex_str[ex_len] = '\0';
+      char* cur = ex_str;
+      while (*cur) {
+        char* nl = strchr(cur, '\n');
+        if (nl) *nl = '\0';
+        size_t ll = strlen(cur);
+        while (ll > 0 && cur[ll - 1] == '\r') cur[--ll] = '\0';
+        if (strncmp(cur, "resourcePacks:", 14) == 0) {
+          if (!replaced) {
+            strlist_add(&lines, rp_line);
+            replaced = 1;
+          }
+        } else if (strncmp(cur, "incompatibleResourcePacks:", 26) == 0) {
+          strlist_add(&lines, "incompatibleResourcePacks:[]");
+          has_incompat = 1;
+        } else if (cur[0]) {
+          strlist_add(&lines, cur);
+        }
+        if (!nl) break;
+        cur = nl + 1;
+      }
+      free(ex_str);
+    }
+  }
+  free(ex_raw);
+  if (!replaced) strlist_add(&lines, rp_line);
+  if (!has_incompat) strlist_add(&lines, "incompatibleResourcePacks:[]");
+  free(rp_line);
+
+  size_t total = 1;
+  for (size_t i = 0; i < lines.count; i++) total += strlen(lines.items[i]) + 1;
+  char* merged = (char*)malloc(total + 1);
+  if (merged) {
+    size_t out_p = 0;
+    for (size_t i = 0; i < lines.count; i++) {
+      size_t ll = strlen(lines.items[i]);
+      memcpy(merged + out_p, lines.items[i], ll);
+      out_p += ll;
+      merged[out_p++] = '\n';
+    }
+    merged[out_p] = '\0';
+    write_entire_file_w(opt_path, merged, out_p);
+    free(merged);
+  }
+  strlist_free(&lines);
+}
+
 static char* build_quoted_argfile(const PanStrList* args) {
   size_t cap = 16384;
   size_t len = 0;
@@ -1911,7 +2033,7 @@ static int apply_loader_json_libs(
         const char* aurl = pan_json_str(pan_json_get(art, "url"), "");
         const char* apath = pan_json_str(pan_json_get(art, "path"), "");
         const char* asha = pan_json_str(pan_json_get(art, "sha1"), "");
-        if (apath[0]) {
+        if (apath[0] && is_safe_rel_path_a(apath)) {
           wchar_t wrel[MAX_PATH], dest[MAX_PATH];
           utf8_to_wide(apath, wrel, MAX_PATH);
           for (int k = 0; wrel[k]; k++) if (wrel[k] == L'/') wrel[k] = L'\\';
@@ -2134,11 +2256,19 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
   }
 
   const char* v_str = pan_json_str(pan_json_get(req_json, "mcVersion"), "1.21.4");
-  strncpy(mc_ver, v_str[0] ? v_str : "1.21.4", sizeof(mc_ver) - 1);
+  if (!is_safe_version_token_a(v_str)) v_str = "1.21.4";
+  strncpy(mc_ver, v_str, sizeof(mc_ver) - 1);
+  mc_ver[sizeof(mc_ver) - 1] = '\0';
   strncpy(version_name, mc_ver, sizeof(version_name) - 1);
+  version_name[sizeof(version_name) - 1] = '\0';
   normalize_loader_name(pan_json_str(pan_json_get(req_json, "loader"), "Vanilla"), loader, sizeof(loader));
   const char* lv_str = pan_json_str(pan_json_get(req_json, "loaderVersion"), "");
-  strncpy(req_loader_ver, lv_str, sizeof(req_loader_ver) - 1);
+  if (lv_str && lv_str[0] && is_safe_version_token_a(lv_str)) {
+    strncpy(req_loader_ver, lv_str, sizeof(req_loader_ver) - 1);
+    req_loader_ver[sizeof(req_loader_ver) - 1] = '\0';
+  } else {
+    req_loader_ver[0] = '\0';
+  }
   const char* close_beh = pan_json_str(pan_json_get(req_json, "closeBehavior"), "quit");
   int should_reopen = (_stricmp(close_beh, "quit") == 0);
 
@@ -2350,7 +2480,7 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
           const char* aurl = pan_json_str(pan_json_get(art, "url"), NULL);
           const char* apath = pan_json_str(pan_json_get(art, "path"), NULL);
           const char* asha = pan_json_str(pan_json_get(art, "sha1"), "");
-          if (aurl && apath && tcnt < max_tasks) {
+          if (aurl && apath && is_safe_rel_path_a(apath) && tcnt < max_tasks) {
             wchar_t wrel[MAX_PATH];
             utf8_to_wide(apath, wrel, MAX_PATH);
             for (int k = 0; wrel[k]; k++) if (wrel[k] == L'/') wrel[k] = L'\\';
@@ -2381,7 +2511,7 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
             const char* nurl = pan_json_str(pan_json_get(c_nat, "url"), NULL);
             const char* npath = pan_json_str(pan_json_get(c_nat, "path"), NULL);
             const char* nsha = pan_json_str(pan_json_get(c_nat, "sha1"), "");
-            if (nurl && npath) {
+            if (nurl && npath && is_safe_rel_path_a(npath)) {
               wchar_t wrel[MAX_PATH];
               utf8_to_wide(npath, wrel, MAX_PATH);
               for (int k = 0; wrel[k]; k++) if (wrel[k] == L'/') wrel[k] = L'\\';
@@ -2996,11 +3126,16 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
   /* 8. Sync shared player profile (servers, language, controls, worlds, resourcepacks) then merge video presets */
   sync_mc_state_to_instance_w(g_mc.base_dir, instance_dir, shared_dir);
   {
+    wchar_t opt_path[MAX_PATH];
+    _snwprintf(opt_path, MAX_PATH, L"%ls\\options.txt", instance_dir);
+    opt_path[MAX_PATH - 1] = L'\0';
     const char* opt_txt = pan_json_str(pan_json_get(req_json, "optionsTxt"), NULL);
     if (opt_txt && opt_txt[0]) {
-      wchar_t opt_path[MAX_PATH];
-      _snwprintf(opt_path, MAX_PATH, L"%ls\\options.txt", instance_dir);
       merge_options_txt_w(opt_path, opt_txt);
+    }
+    const PanJsonValue* rpacks = pan_json_get(req_json, "enabledResourcePacks");
+    if (rpacks && rpacks->type == PAN_JSON_ARRAY) {
+      merge_resource_packs_w(opt_path, rpacks, mc_ver);
     }
   }
 
@@ -3013,13 +3148,23 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
     size_t cp_cap = 32768;
     size_t cp_len = 0;
     classpath = (char*)malloc(cp_cap);
+    if (!classpath) {
+      snprintf(err_msg, sizeof(err_msg), "Sin memoria para classpath.");
+      goto on_error;
+    }
     for (size_t i = 0; i < cp_map.count; i++) {
       char item_u8[MAX_PATH * 3];
       wide_to_utf8(cp_map.items[i].val, item_u8, sizeof(item_u8));
       size_t ilen = strlen(item_u8);
       if (cp_len + ilen + 8 >= cp_cap) {
         cp_cap *= 2;
-        classpath = (char*)realloc(classpath, cp_cap);
+        char* ncp = (char*)realloc(classpath, cp_cap);
+        if (!ncp) {
+          free(classpath);
+          snprintf(err_msg, sizeof(err_msg), "Sin memoria ampliando classpath.");
+          goto on_error;
+        }
+        classpath = ncp;
       }
       memcpy(classpath + cp_len, item_u8, ilen);
       cp_len += ilen;
@@ -3033,7 +3178,13 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
       size_t clen = strlen(client_utf8);
       if (cp_len + clen + 4 >= cp_cap) {
         cp_cap = cp_len + clen + 16;
-        classpath = (char*)realloc(classpath, cp_cap);
+        char* ncp = (char*)realloc(classpath, cp_cap);
+        if (!ncp) {
+          free(classpath);
+          snprintf(err_msg, sizeof(err_msg), "Sin memoria ampliando classpath.");
+          goto on_error;
+        }
+        classpath = ncp;
       }
       memcpy(classpath + cp_len, client_utf8, clen);
       cp_len += clen;
