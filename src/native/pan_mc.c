@@ -1712,16 +1712,27 @@ static void merge_options_txt_w(const wchar_t* opt_path, const char* new_txt) {
           char* colon = strchr(cur, ':');
           if (colon && colon > cur) {
             size_t klen = (size_t)(colon - cur);
-            int replaced = 0;
-            for (size_t i = 0; i < lines.count; i++) {
+            int first_idx = -1;
+            for (size_t i = lines.count; i-- > 0;) {
               if (strncmp(lines.items[i], cur, klen) == 0 && lines.items[i][klen] == ':') {
                 free(lines.items[i]);
-                lines.items[i] = xstrdup(cur);
-                replaced = 1;
-                break;
+                for (size_t j = i; j + 1 < lines.count; j++) {
+                  lines.items[j] = lines.items[j + 1];
+                }
+                lines.count--;
+                first_idx = (int)i;
               }
             }
-            if (!replaced) strlist_add(&lines, cur);
+            if (first_idx >= 0) {
+              strlist_add(&lines, cur);
+              char* added = lines.items[lines.count - 1];
+              for (size_t j = lines.count - 1; j > (size_t)first_idx; j--) {
+                lines.items[j] = lines.items[j - 1];
+              }
+              lines.items[first_idx] = added;
+            } else {
+              strlist_add(&lines, cur);
+            }
           }
         }
         if (!nl) break;
@@ -1751,13 +1762,18 @@ static void merge_options_txt_w(const wchar_t* opt_path, const char* new_txt) {
   strlist_free(&lines);
 }
 
-static void merge_resource_packs_w(const wchar_t* opt_path, const PanJsonValue* arr, const char* mc_ver) {
+static void merge_resource_packs_w(const wchar_t* opt_path, const PanJsonValue* arr, const PanJsonValue* incompat_arr, const char* mc_ver) {
   if (!arr || arr->type != PAN_JSON_ARRAY) return;
   int legacy = is_legacy_pack_mc_version_a(mc_ver);
 
   size_t rp_cap = 8192;
   char* rp_line = (char*)malloc(rp_cap);
-  if (!rp_line) return;
+  char* inc_line = (char*)malloc(rp_cap);
+  if (!rp_line || !inc_line) {
+    free(rp_line);
+    free(inc_line);
+    return;
+  }
   size_t pos = 0;
   pos += (size_t)_snprintf(rp_line + pos, rp_cap - pos, "resourcePacks:[%s", legacy ? "" : "\"vanilla\"");
   int entry_cnt = legacy ? 0 : 1;
@@ -1784,6 +1800,32 @@ static void merge_resource_packs_w(const wchar_t* opt_path, const PanJsonValue* 
   rp_line[pos++] = ']';
   rp_line[pos] = '\0';
 
+  size_t inc_pos = 0;
+  inc_pos += (size_t)_snprintf(inc_line + inc_pos, rp_cap - inc_pos, "incompatibleResourcePacks:[");
+  int inc_cnt = 0;
+  if (!legacy && incompat_arr && incompat_arr->type == PAN_JSON_ARRAY) {
+    for (size_t i = 0; i < incompat_arr->u.arr.count; i++) {
+      const char* raw_fn = pan_json_str(incompat_arr->u.arr.items[i], NULL);
+      if (!raw_fn || !raw_fn[0]) continue;
+      if (strstr(raw_fn, "..") || strchr(raw_fn, '/') || strchr(raw_fn, '\\') ||
+          strchr(raw_fn, '"') || strchr(raw_fn, '\n') || strchr(raw_fn, '\r')) {
+        continue;
+      }
+      char entry_buf[540];
+      _snprintf(entry_buf, sizeof(entry_buf), "\"file/%s\"", raw_fn);
+      entry_buf[sizeof(entry_buf) - 1] = '\0';
+      size_t elen = strlen(entry_buf);
+      if (inc_pos + elen + 16 < rp_cap) {
+        if (inc_cnt > 0) inc_line[inc_pos++] = ',';
+        memcpy(inc_line + inc_pos, entry_buf, elen);
+        inc_pos += elen;
+        inc_cnt++;
+      }
+    }
+  }
+  inc_line[inc_pos++] = ']';
+  inc_line[inc_pos] = '\0';
+
   PanStrList lines = {0};
   size_t ex_len = 0;
   uint8_t* ex_raw = read_entire_file_w(opt_path, &ex_len);
@@ -1806,8 +1848,10 @@ static void merge_resource_packs_w(const wchar_t* opt_path, const PanJsonValue* 
             replaced = 1;
           }
         } else if (strncmp(cur, "incompatibleResourcePacks:", 26) == 0) {
-          strlist_add(&lines, "incompatibleResourcePacks:[]");
-          has_incompat = 1;
+          if (!has_incompat) {
+            strlist_add(&lines, inc_line);
+            has_incompat = 1;
+          }
         } else if (cur[0]) {
           strlist_add(&lines, cur);
         }
@@ -1819,8 +1863,9 @@ static void merge_resource_packs_w(const wchar_t* opt_path, const PanJsonValue* 
   }
   free(ex_raw);
   if (!replaced) strlist_add(&lines, rp_line);
-  if (!has_incompat) strlist_add(&lines, "incompatibleResourcePacks:[]");
+  if (!has_incompat) strlist_add(&lines, inc_line);
   free(rp_line);
+  free(inc_line);
 
   size_t total = 1;
   for (size_t i = 0; i < lines.count; i++) total += strlen(lines.items[i]) + 1;
@@ -3134,8 +3179,9 @@ static DWORD WINAPI LaunchWorkerThread(LPVOID param) {
       merge_options_txt_w(opt_path, opt_txt);
     }
     const PanJsonValue* rpacks = pan_json_get(req_json, "enabledResourcePacks");
+    const PanJsonValue* incompat_rpacks = pan_json_get(req_json, "incompatibleResourcePacks");
     if (rpacks && rpacks->type == PAN_JSON_ARRAY) {
-      merge_resource_packs_w(opt_path, rpacks, mc_ver);
+      merge_resource_packs_w(opt_path, rpacks, incompat_rpacks, mc_ver);
     }
   }
 

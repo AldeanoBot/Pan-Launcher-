@@ -28,7 +28,7 @@
     return rawVer;
   }
 
-  function renderPackCard(pack, mcVersion, inspector) {
+  function renderPackCard(pack, mcVersion, inspector, metaInfo) {
     const compat = inspector
       ? inspector.evaluateResourcePackCompatibility(pack, mcVersion)
       : { compatible: true, status: 'compatible', reason: '' };
@@ -49,7 +49,7 @@
       } else {
         badgeClass = 'badge-snapshot';
         badgeLabel = t('rpack.badgeUnknown', null, 'Revisar');
-        cardStateClass = 'is-compatible';
+        cardStateClass = !pack.hasMcmeta ? 'is-incompatible' : 'is-compatible';
       }
     }
 
@@ -60,6 +60,9 @@
       ? `MC ${pack.mcVersionRangeLabel}`
       : null;
 
+    const { index, total, activeRank } = metaInfo;
+    const rankTitle = t('rpack.priorityTitle', null, 'Prioridad de carga en Minecraft (#1 va encima de todo)');
+
     return `
       <article class="rpack-card ${cardStateClass}" data-rpack-id="${escapeHtml(pack.id)}">
         <div class="rpack-leading">
@@ -68,8 +71,10 @@
             : `<div class="rpack-thumb-placeholder" aria-hidden="true"><span data-icon="pack"></span></div>`}
           <div class="custom-mod-main">
             <div class="custom-mod-title-row">
+              ${activeRank ? `<span class="rpack-priority-rank" title="${escapeHtml(rankTitle)}">#${activeRank}</span>` : ''}
               <strong>${escapeHtml(pack.name || pack.filename)}</strong>
               <span class="badge ${badgeClass}">${escapeHtml(badgeLabel)}</span>
+              ${pack.normalized ? `<span class="badge badge-ok">${escapeHtml(t('rpack.badgeNormalized', null, 'Raíz corregida'))}</span>` : ''}
             </div>
             <div class="custom-mod-meta">
               <span><code>${escapeHtml(pack.filename)}</code></span>
@@ -85,6 +90,23 @@
           </div>
         </div>
         <div class="custom-mod-actions">
+          ${total > 1 ? `
+            <div class="rpack-order-btns">
+              <button type="button"
+                      class="btn btn-xs btn-icon-step"
+                      data-action="rpack-move-up"
+                      data-id="${escapeHtml(pack.id)}"
+                      ${index === 0 ? 'disabled' : ''}
+                      aria-label="${escapeHtml(t('rpack.moveUp', null, 'Subir prioridad') + ' ' + (pack.name || pack.filename))}"
+                      title="${escapeHtml(t('rpack.moveUp', null, 'Subir prioridad'))}">↑</button>
+              <button type="button"
+                      class="btn btn-xs btn-icon-step"
+                      data-action="rpack-move-down"
+                      data-id="${escapeHtml(pack.id)}"
+                      ${index >= total - 1 ? 'disabled' : ''}
+                      aria-label="${escapeHtml(t('rpack.moveDown', null, 'Bajar prioridad') + ' ' + (pack.name || pack.filename))}"
+                      title="${escapeHtml(t('rpack.moveDown', null, 'Bajar prioridad'))}">↓</button>
+            </div>` : ''}
           <label class="custom-mod-switch" title="${escapeHtml(pack.enabled ? t('rpack.toggleDisableTitle') : t('rpack.toggleEnableTitle'))}">
             <input type="checkbox"
                    class="rpack-toggle"
@@ -116,7 +138,7 @@
       ? packs.filter((p) => {
           if (!p || !p.enabled) return false;
           const res = inspector.evaluateResourcePackCompatibility(p, mcVersion);
-          return res.status === 'incompatible';
+          return !res.compatible;
         })
       : [];
 
@@ -124,6 +146,8 @@
       ? t('rpack.incompatOne', null, 'resource pack activo')
       : t('rpack.incompatMany', null, 'resource packs activos');
     const targetFmtStr = targetFmt ? t('rpack.targetFmt', { fmt: targetFmt }, ` · formato requerido ${targetFmt}`) : '';
+
+    let activeCounter = 0;
 
     return `
       <div class="page">
@@ -141,7 +165,7 @@
            </div>`
         )}
 
-        <section id="rpacks-dropzone" class="panel mods-dropzone rpacks-dropzone${rpState.uploading ? ' is-uploading' : ''}" tabindex="0" aria-label="${escapeHtml(t('rpack.dropAria', null, 'Zona para arrastrar resource packs .zip'))}">
+        <section id="rpacks-dropzone" class="panel mods-dropzone rpacks-dropzone${rpState.uploading ? ' is-uploading' : ''}" tabindex="0" role="button" aria-label="${escapeHtml(t('rpack.dropAria', null, 'Zona para arrastrar resource packs .zip'))}">
           <input id="rpacks-file-input" type="file" accept=".zip,application/zip,application/x-zip-compressed" multiple hidden>
           <div class="mods-dropzone-icon">
             <span data-icon="pack"></span>
@@ -170,7 +194,7 @@
           <div class="panel-head">
             <div>
               <h3>${escapeHtml(t('rpack.listTitle', { enabled: enabledCount, total: packs.length }))}</h3>
-              <p>${t('rpack.targetLine', { mc: escapeHtml(mcVersion), fmt: escapeHtml(targetFmtStr) })}</p>
+              <p>${t('rpack.targetLine', { mc: escapeHtml(mcVersion), fmt: escapeHtml(targetFmtStr) })}${enabledCount > 1 ? ` · <span class="muted">${escapeHtml(t('rpack.priorityHint', null, '#1 tiene prioridad máxima'))}</span>` : ''}</p>
             </div>
             ${packs.length ? `
               <button type="button" class="btn btn-xs" data-action="rpacks-refresh">
@@ -179,7 +203,10 @@
           </div>
           ${packs.length
             ? `<div class="rpacks-list">
-                ${packs.map((pack) => renderPackCard(pack, mcVersion, inspector)).join('')}
+                ${packs.map((pack, idx) => {
+                  const activeRank = pack && pack.enabled ? ++activeCounter : 0;
+                  return renderPackCard(pack, mcVersion, inspector, { index: idx, total: packs.length, activeRank });
+                }).join('')}
                </div>`
             : `<div class="mods-empty-state">
                 <p>${escapeHtml(t('rpack.emptyTitle', null, 'Todavía no has añadido ningún Resource Pack.'))}</p>

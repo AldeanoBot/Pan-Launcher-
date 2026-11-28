@@ -151,6 +151,9 @@
       list: () => (bridge && bridge.resourcePacks ? bridge.resourcePacks.list() : Promise.resolve([])),
       addFiles: (files) => (bridge && bridge.resourcePacks ? bridge.resourcePacks.addFiles(files) : unavailable()),
       toggle: (id, enabled) => (bridge && bridge.resourcePacks ? bridge.resourcePacks.toggle(id, enabled) : unavailable()),
+      reorder: (id, direction) => (bridge && bridge.resourcePacks && typeof bridge.resourcePacks.reorder === 'function'
+        ? bridge.resourcePacks.reorder(id, direction)
+        : unavailable()),
       remove: (id) => (bridge && bridge.resourcePacks ? bridge.resourcePacks.remove(id) : unavailable()),
       disableIncompatible: (mcVersion) => (bridge && bridge.resourcePacks
         ? bridge.resourcePacks.disableIncompatible(mcVersion)

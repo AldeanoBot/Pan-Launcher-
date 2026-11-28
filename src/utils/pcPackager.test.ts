@@ -89,6 +89,9 @@ test('buildWindowsSelfContainedBat embeds hardened run.ps1, server.ps1, launch.p
   assert.match(serverPs1, /api\/mc\/ping/);
   assert.match(serverPs1, /api\/pc\/download-app/);
   assert.match(serverPs1, /Resolve-LoaderCatalog/);
+  assert.match(serverPs1, /Get-QueryParamUtf8/);
+  assert.match(serverPs1, /Resolve-ResourcePackDiskPath/);
+  assert.match(serverPs1, /Extension -ieq "\.zip"/);
   assert.match(serverPs1, /Start-LaunchWorker/);
   assert.match(serverPs1, /KeepAlive = \$false/);
   assert.match(serverPs1, /try \{ \$res\.StatusCode = 500 \} catch \{\}/);
@@ -111,6 +114,10 @@ test('buildWindowsSelfContainedBat embeds hardened run.ps1, server.ps1, launch.p
   assert.doesNotMatch(launchPs1, /UseCompactObjectHeaders/);
   assert.doesNotMatch(launchPs1, /DisableExplicitGC/);
   assert.match(launchPs1, /Merge-OptionsTxt/);
+  assert.match(launchPs1, /Normalize-ResourcePacksFolder/);
+  assert.match(launchPs1, /\$mcVer -match "\^1\\\\\.(\\\\d\+)"/.source.replace(/\\\\\\\\/, '\\\\') === '' ? /never/ : /\$mcVer -match "\^1\\\.\(\\d\+\)"/);
+  assert.doesNotMatch(launchPs1, /\$mcVer -match "\^1\\\\\\\\/);
+  assert.match(launchPs1, /mklink \/J `"\$instSub`" `"\$sharedSub`"/);
   assert.match(launchPs1, /Bootstrap-SharedState/);
   assert.match(launchPs1, /Sync-SharedFileNewest/);
   assert.match(launchPs1, /Link-SharedDirectory/);
@@ -126,7 +133,7 @@ test('buildWindowsSelfContainedBat embeds hardened run.ps1, server.ps1, launch.p
   assert.match(launchPs1, /Find-CrashTailSafe/);
   assert.match(launchPs1, /pan-custom-mods\.json/);
   assert.match(launchPs1, /customModFiles/);
-  assert.match(launchPs1, /incompatibleResourcePacks:\[\]/);
+  assert.match(launchPs1, /incompatibleResourcePacks:\["/);
   assert.match(launchPs1, /sharedOptPath/);
   assert.ok(!/"\$\{(auth_|natives_|classpath|launcher_|version_|game_|assets_)/.test(launchPs1), 'Must use single quotes for Mojang template tokens in PowerShell');
 
@@ -139,7 +146,7 @@ test('buildWindowsSelfContainedBat embeds hardened run.ps1, server.ps1, launch.p
   assert.match(decodedRunPs1, /Pan-launcher\.lnk/);
 });
 
-test('buildUnixSelfContainedSh embeds hardened Python 3 backend with resourcepacks, CORS, and SSRF protection', () => {
+test('buildUnixSelfContainedSh embeds hardened Python 3 backend with resourcepacks normalization, CORS, and SSRF protection', () => {
   const fakeZipB64 = Buffer.from('PK_MOCK_ZIP').toString('base64');
   const sh = buildUnixSelfContainedSh(fakeZipB64, '2.0.1');
 
@@ -177,6 +184,8 @@ test('buildUnixSelfContainedSh embeds hardened Python 3 backend with resourcepac
   assert.doesNotMatch(serverPy, /UseCompactObjectHeaders/);
   assert.doesNotMatch(serverPy, /DisableExplicitGC/);
   assert.match(serverPy, /merge_options_txt/);
+  assert.match(serverPy, /normalize_resource_packs_dir/);
+  assert.match(serverPy, /resolve_resource_pack_disk_path/);
   assert.match(serverPy, /bootstrap_shared_state/);
   assert.match(serverPy, /sync_shared_file_newest/);
   assert.match(serverPy, /link_shared_dir/);
@@ -187,7 +196,7 @@ test('buildUnixSelfContainedSh embeds hardened Python 3 backend with resourcepac
   assert.match(serverPy, /open_launcher_ui/);
   assert.match(serverPy, /watch_mc_exit/);
   assert.match(serverPy, /find_crash_tail/);
-  assert.match(serverPy, /incompatibleResourcePacks:\[\]/);
+  assert.match(serverPy, /incompatibleResourcePacks:/);
   assert.match(serverPy, /shared_dir \/ "options\.txt"/);
   assert.match(serverPy, /version_type.*==.*"release"/);
 
@@ -199,6 +208,36 @@ test('buildUnixSelfContainedSh embeds hardened Python 3 backend with resourcepac
     fs.writeFileSync(pyFile, serverPy, 'utf8');
     execFileSync('bash', ['-n', shFile]);
     execFileSync('python3', ['-m', 'py_compile', pyFile]);
+
+    // Execute generated Python resource pack helpers against real files to verify runtime behavior
+    const pyTest = [
+      'import importlib.util, json, pathlib, sys, tempfile, zipfile',
+      `spec = importlib.util.spec_from_file_location("panserv", ${JSON.stringify(pyFile)})`,
+      'mod = importlib.util.module_from_spec(spec)',
+      'spec.loader.exec_module(mod)',
+      'with tempfile.TemporaryDirectory() as td:',
+      '  d = pathlib.Path(td)',
+      '  zp = d / "CoolPack.zip"',
+      '  with zipfile.ZipFile(zp, "w") as z:',
+      '    z.writestr("CoolPack/pack.mcmeta", json.dumps({"pack": {"pack_format": 1, "description": "Hi"}}))',
+      '    z.writestr("__MACOSX/CoolPack/._pack.mcmeta", b"junk")',
+      '  mod.normalize_resource_packs_dir(d)',
+      '  with zipfile.ZipFile(zp, "r") as z:',
+      '    names = z.namelist()',
+      '    assert "pack.mcmeta" in names, f"Expected root pack.mcmeta, got {names}"',
+      '    assert all(not n.startswith("__MACOSX") for n in names)',
+      '  opt = d / "options.txt"',
+      '  opt.write_text("maxFps:120\\nresourcePacks:[\\"vanilla\\"]\\n", encoding="utf-8")',
+      '  mod.merge_resource_packs_line(opt, ["CoolPack.zip"], "1.21.4", ["CoolPack.zip"])',
+      '  txt = opt.read_text(encoding="utf-8")',
+      '  assert "resourcePacks:[\\"vanilla\\",\\"file/CoolPack.zip\\"]" in txt, txt',
+      '  assert "incompatibleResourcePacks:[\\"file/CoolPack.zip\\"]" in txt, txt',
+      '  mod.merge_resource_packs_line(opt, ["CoolPack.zip"], "1.8.9", ["CoolPack.zip"])',
+      '  txt2 = opt.read_text(encoding="utf-8")',
+      '  assert "resourcePacks:[\\"CoolPack.zip\\"]" in txt2, txt2',
+      '  assert "incompatibleResourcePacks:[]" in txt2, txt2',
+    ].join('\n');
+    execFileSync('python3', ['-c', pyTest], { stdio: 'pipe' });
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

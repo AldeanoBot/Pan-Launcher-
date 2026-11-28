@@ -892,6 +892,8 @@
           : [];
         if (incompat.length > 0) {
           toast(t('msg.rpacksAddedIncompat', { count: result.added, incompat: incompat.length, mc: profile.gameVersion }), 'error');
+        } else if (result.normalizedCount > 0) {
+          toast(t('msg.rpacksAddedNormalized', { count: result.added, normalized: result.normalizedCount }));
         } else {
           toast(result.added === 1
             ? t('msg.rpacksAddedOk', { count: result.added })
@@ -2002,6 +2004,20 @@
         break;
       }
 
+      case 'rpack-move-up':
+      case 'rpack-move-down': {
+        const id = node.getAttribute('data-id');
+        if (!id || !Nexus.api.resourcePacks || typeof Nexus.api.resourcePacks.reorder !== 'function') break;
+        const dir = action === 'rpack-move-up' ? 'up' : 'down';
+        try {
+          current.resourcePacks.items = await Nexus.api.resourcePacks.reorder(id, dir);
+          refresh();
+        } catch (error) {
+          toast(publicErrorMessage(error), 'error');
+        }
+        break;
+      }
+
       case 'rpack-remove': {
         const id = node.getAttribute('data-id');
         if (!id) break;
@@ -2069,8 +2085,23 @@
 
     root.addEventListener('click', (event) => {
       const node = event.target.closest('[data-action]');
-      if (!node || !root.contains(node)) return;
-      handleAction(node);
+      if (node && root.contains(node)) {
+        handleAction(node);
+        return;
+      }
+      const rpackZone = event.target.closest('#rpacks-dropzone');
+      if (rpackZone && !event.target.closest('button, input, a, label')) {
+        const input = document.getElementById('rpacks-file-input');
+        if (input) input.click();
+      }
+    });
+
+    root.addEventListener('keydown', (event) => {
+      if (event.target && event.target.id === 'rpacks-dropzone' && (event.key === 'Enter' || event.key === ' ')) {
+        event.preventDefault();
+        const input = document.getElementById('rpacks-file-input');
+        if (input) input.click();
+      }
     });
 
     const hasDraggedFiles = (event) => {

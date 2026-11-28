@@ -48,10 +48,30 @@
 
   function normalizeFormatValue(raw) {
     if (typeof raw === 'number' && Number.isFinite(raw)) return Math.trunc(raw);
+    if (typeof raw === 'string' && raw.trim() && Number.isFinite(Number(raw.trim()))) {
+      return Math.trunc(Number(raw.trim()));
+    }
     if (Array.isArray(raw) && raw.length > 0 && Number.isFinite(Number(raw[0]))) {
       return Math.trunc(Number(raw[0]));
     }
     return null;
+  }
+
+  function parseLenientJson(rawInput) {
+    const cleanJson = String(rawInput || '').replace(/^\uFEFF/, '').trim();
+    if (!cleanJson) return null;
+    try {
+      const obj = JSON.parse(cleanJson);
+      return obj && typeof obj === 'object' ? obj : null;
+    } catch {
+      try {
+        const noTrailing = cleanJson.replace(/,\s*([}\]])/g, '$1');
+        const obj = JSON.parse(noTrailing);
+        return obj && typeof obj === 'object' ? obj : null;
+      } catch {
+        return null;
+      }
+    }
   }
 
   function describePackFormatRange(minFmt, maxFmt) {
@@ -85,19 +105,13 @@
     return `${fmtToLabel(minFmt)} – ${fmtToLabel(maxFmt)}`;
   }
 
-  function extractMcmetaInfo(rawInput, rawFilename, iconDataUrl) {
+  function extractMcmetaInfo(rawInput, rawFilename, iconDataUrl, extra) {
     const filename = sanitizeResourcePackFilename(rawFilename);
     const fallbackName = filename.replace(/\.zip$/i, '');
     let parsed = null;
 
     if (typeof rawInput === 'string' && rawInput.trim()) {
-      try {
-        const cleanJson = rawInput.replace(/^\uFEFF/, '');
-        const obj = JSON.parse(cleanJson);
-        if (obj && typeof obj === 'object') parsed = obj;
-      } catch {
-        parsed = null;
-      }
+      parsed = parseLenientJson(rawInput);
     } else if (rawInput && typeof rawInput === 'object') {
       parsed = rawInput;
     }
@@ -114,6 +128,9 @@
         mcVersionRangeLabel: '—',
         hasMcmeta: false,
         iconDataUrl: iconDataUrl || '',
+        normalized: Boolean(extra && extra.normalized),
+        nestedRoot: (extra && extra.nestedRoot) || null,
+        isShaderPack: Boolean(extra && extra.isShaderPack),
         source: 'filename'
       };
     }
@@ -155,6 +172,9 @@
       mcVersionRangeLabel: describePackFormatRange(minFormat, maxFormat),
       hasMcmeta: true,
       iconDataUrl: iconDataUrl || '',
+      normalized: Boolean(extra && extra.normalized),
+      nestedRoot: (extra && extra.nestedRoot) || null,
+      isShaderPack: false,
       source: 'mcmeta'
     };
   }
@@ -193,6 +213,19 @@
   function evaluateResourcePackCompatibility(pack, mcVersion) {
     const ver = String(mcVersion || '1.21.4').trim() || '1.21.4';
     const targetFormat = resourcePackFormatForMcVersion(ver);
+
+    if (pack && pack.isShaderPack && !pack.hasMcmeta) {
+      return {
+        compatible: false,
+        status: 'unknown',
+        targetFormat,
+        reason: t(
+          'rpack.compat.isShader',
+          null,
+          'Parece un pack de Shaders (carpeta shaders/ sin pack.mcmeta). Debe ir en shaderpacks/, no en Resource Packs.'
+        )
+      };
+    }
 
     if (!pack || !pack.hasMcmeta || (pack.minFormat === null && pack.packFormat === null)) {
       return {
@@ -257,23 +290,50 @@
     return `resourcePacks:${JSON.stringify(entries)}`;
   }
 
-  function applyResourcePacksToOptionsTxt(optionsTxt, enabledFilenames, mcVersion) {
+  function buildOptionsIncompatiblePacksLine(incompatibleFilenames, mcVersion) {
+    if (isLegacyResourcePackMcVersion(mcVersion)) {
+      return 'incompatibleResourcePacks:[]';
+    }
+    const seen = new Set();
+    const entries = [];
+    if (Array.isArray(incompatibleFilenames)) {
+      for (const raw of incompatibleFilenames) {
+        const clean = sanitizeResourcePackFilename(raw);
+        const tok = `file/${clean}`;
+        if (!seen.has(tok)) {
+          seen.add(tok);
+          entries.push(tok);
+        }
+      }
+    }
+    return `incompatibleResourcePacks:${JSON.stringify(entries)}`;
+  }
+
+  function applyResourcePacksToOptionsTxt(optionsTxt, enabledFilenames, mcVersion, incompatibleFilenames) {
     const base = String(optionsTxt || '').trimEnd();
     const rpLine = buildOptionsResourcePacksLine(enabledFilenames, mcVersion);
     const lines = base ? base.split(/\r?\n/) : [];
-    const filtered = lines.filter((line) => !line.startsWith('resourcePacks:'));
+    const filtered = lines.filter(
+      (line) => !line.startsWith('resourcePacks:') && !line.startsWith('incompatibleResourcePacks:')
+    );
     filtered.push(rpLine);
+    if (Array.isArray(incompatibleFilenames)) {
+      filtered.push(buildOptionsIncompatiblePacksLine(incompatibleFilenames, mcVersion));
+    }
     return filtered.join('\n');
   }
 
   function bytesToPngDataUrl(bytes) {
-    if (!bytes || bytes.length < 24 || bytes.length > 262144) return '';
+    if (!bytes || bytes.length < 24 || bytes.length > 2 * 1024 * 1024) return '';
     const sig = [137, 80, 78, 71, 13, 10, 26, 10];
     for (let i = 0; i < sig.length; i++) {
       if (bytes[i] !== sig[i]) return '';
     }
     let bin = '';
-    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    }
     try {
       return `data:image/png;base64,${window.btoa(bin)}`;
     } catch {
@@ -281,8 +341,97 @@
     }
   }
 
+  function isMacOrOsJunkPath(lowerName) {
+    return (
+      lowerName === '__macosx' ||
+      lowerName.startsWith('__macosx/') ||
+      lowerName === '.ds_store' ||
+      lowerName.endsWith('/.ds_store') ||
+      lowerName === 'thumbs.db' ||
+      lowerName.endsWith('/thumbs.db')
+    );
+  }
+
+  function parseCentralDirectory(buffer) {
+    const bytes = new Uint8Array(buffer);
+    if (bytes.length < 22) return { validZip: false, zip64: false, entries: [], bytes, view: null };
+    const view = new DataView(buffer);
+    const sig0 = view.getUint32(0, true);
+    if (sig0 !== 0x04034b50 && sig0 !== 0x06054b50) {
+      return { validZip: false, zip64: false, entries: [], bytes, view };
+    }
+
+    let eocdOffset = -1;
+    const minSearch = Math.max(0, bytes.length - 65558);
+    for (let pos = bytes.length - 22; pos >= minSearch; pos--) {
+      if (bytes[pos] === 0x50 && bytes[pos + 1] === 0x4b && bytes[pos + 2] === 0x05 && bytes[pos + 3] === 0x06) {
+        const cLen = view.getUint16(pos + 20, true);
+        if (pos + 22 + cLen === bytes.length) {
+          eocdOffset = pos;
+          break;
+        }
+        if (eocdOffset < 0) eocdOffset = pos;
+      }
+    }
+    if (eocdOffset < 0) return { validZip: false, zip64: false, entries: [], bytes, view };
+
+    const totalEntries = view.getUint16(eocdOffset + 10, true);
+    const cdSize = view.getUint32(eocdOffset + 12, true);
+    const cdOffset = view.getUint32(eocdOffset + 16, true);
+    if (totalEntries === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) {
+      return { validZip: true, zip64: true, entries: [], bytes, view };
+    }
+
+    const decoder = new TextDecoder('utf-8', { fatal: false });
+    const entries = [];
+    let ptr = cdOffset;
+
+    for (let i = 0; i < totalEntries && ptr + 46 <= bytes.length; i++) {
+      if (view.getUint32(ptr, true) !== 0x02014b50) break;
+      const flags = view.getUint16(ptr + 8, true);
+      const method = view.getUint16(ptr + 10, true);
+      const dosTime = view.getUint16(ptr + 12, true);
+      const dosDate = view.getUint16(ptr + 14, true);
+      const crc32 = view.getUint32(ptr + 16, true);
+      const compSize = view.getUint32(ptr + 20, true);
+      const uncompSize = view.getUint32(ptr + 24, true);
+      const nameLen = view.getUint16(ptr + 28, true);
+      const extraLen = view.getUint16(ptr + 30, true);
+      const commentLen = view.getUint16(ptr + 32, true);
+      const internalAttr = view.getUint16(ptr + 36, true);
+      const externalAttr = view.getUint32(ptr + 38, true);
+      const localHeaderOffset = view.getUint32(ptr + 42, true);
+      if (ptr + 46 + nameLen > bytes.length) break;
+
+      const rawName = decoder.decode(bytes.subarray(ptr + 46, ptr + 46 + nameLen));
+      const cleanName = rawName.replace(/\\/g, '/').replace(/^(\.\/|\/)+/, '');
+      const lowerName = cleanName.toLowerCase();
+      ptr += 46 + nameLen + extraLen + commentLen;
+
+      entries.push({
+        rawName,
+        cleanName,
+        lowerName,
+        isDir: cleanName.endsWith('/'),
+        isJunk: isMacOrOsJunkPath(lowerName),
+        flags,
+        method,
+        dosTime,
+        dosDate,
+        crc32,
+        compSize,
+        uncompSize,
+        internalAttr,
+        externalAttr,
+        localHeaderOffset
+      });
+    }
+
+    return { validZip: true, zip64: false, entries, bytes, view };
+  }
+
   async function extractEntryBytes(view, bytes, entry, maxBytes) {
-    if (entry.localHeaderOffset + 30 > bytes.length) return null;
+    if (!view || entry.localHeaderOffset + 30 > bytes.length) return null;
     if (view.getUint32(entry.localHeaderOffset, true) !== 0x04034b50) return null;
     const lNameLen = view.getUint16(entry.localHeaderOffset + 26, true);
     const lExtraLen = view.getUint16(entry.localHeaderOffset + 28, true);
@@ -301,70 +450,216 @@
     return null;
   }
 
-  async function readZipEntries(buffer) {
-    const out = { mcmeta: null, iconDataUrl: '', hasZipHeader: false };
-    const bytes = new Uint8Array(buffer);
-    if (bytes.length < 22) return out;
-    const view = new DataView(buffer);
-    const sig0 = view.getUint32(0, true);
-    out.hasZipHeader = sig0 === 0x04034b50 || sig0 === 0x06054b50;
-    if (!out.hasZipHeader) return out;
+  function detectZipLayout(entries) {
+    let hasRootMcmeta = false;
+    let mcmetaEntry = null;
+    let pngEntry = null;
+    const nestedMcmetas = [];
+    const nestedPngs = [];
+    const topSegments = new Set();
+    let hasShaders = false;
 
-    let eocdOffset = -1;
-    const minSearch = Math.max(0, bytes.length - 65558);
-    for (let pos = bytes.length - 22; pos >= minSearch; pos--) {
-      if (bytes[pos] === 0x50 && bytes[pos + 1] === 0x4b && bytes[pos + 2] === 0x05 && bytes[pos + 3] === 0x06) {
-        eocdOffset = pos;
-        break;
+    for (const e of entries) {
+      if (e.isJunk || !e.cleanName) continue;
+      const parts = e.cleanName.split('/').filter(Boolean);
+      if (parts.length > 0) topSegments.add(parts[0]);
+
+      if (e.lowerName === 'pack.mcmeta') {
+        hasRootMcmeta = true;
+        if (!mcmetaEntry) mcmetaEntry = e;
+      } else if (e.lowerName === 'pack.png') {
+        if (!pngEntry) pngEntry = e;
+      } else if (/^[^/]+\/pack\.mcmeta$/i.test(e.lowerName)) {
+        nestedMcmetas.push(e);
+      } else if (/^[^/]+\/pack\.png$/i.test(e.lowerName)) {
+        nestedPngs.push(e);
+      }
+
+      if (e.lowerName.startsWith('shaders/') || /^[^/]+\/shaders\//i.test(e.lowerName)) {
+        hasShaders = true;
       }
     }
-    if (eocdOffset < 0) return out;
 
-    const totalEntries = view.getUint16(eocdOffset + 10, true);
-    const cdOffset = view.getUint32(eocdOffset + 16, true);
-    const decoder = new TextDecoder('utf-8', { fatal: false });
-    let ptr = cdOffset;
-
-    for (let i = 0; i < totalEntries && ptr + 46 <= bytes.length; i++) {
-      if (view.getUint32(ptr, true) !== 0x02014b50) break;
-      const method = view.getUint16(ptr + 10, true);
-      const compSize = view.getUint32(ptr + 20, true);
-      const uncompSize = view.getUint32(ptr + 24, true);
-      const nameLen = view.getUint16(ptr + 28, true);
-      const extraLen = view.getUint16(ptr + 30, true);
-      const commentLen = view.getUint16(ptr + 32, true);
-      const localHeaderOffset = view.getUint32(ptr + 42, true);
-      if (ptr + 46 + nameLen > bytes.length) break;
-
-      const entryName = decoder
-        .decode(bytes.subarray(ptr + 46, ptr + 46 + nameLen))
-        .replace(/\\/g, '/')
-        .replace(/^(\.\/|\/)+/, '')
-        .toLowerCase();
-      ptr += 46 + nameLen + extraLen + commentLen;
-
-      if (entryName === 'pack.mcmeta' && !out.mcmeta) {
-        try {
-          const data = await extractEntryBytes(view, bytes, { method, compSize, uncompSize, localHeaderOffset }, 256 * 1024);
-          if (data) out.mcmeta = decoder.decode(data);
-        } catch { /* ignore */ }
-      } else if (entryName === 'pack.png' && !out.iconDataUrl) {
-        try {
-          const data = await extractEntryBytes(view, bytes, { method, compSize, uncompSize, localHeaderOffset }, 256 * 1024);
-          if (data) out.iconDataUrl = bytesToPngDataUrl(data);
-        } catch { /* ignore */ }
+    let nestedRoot = null;
+    if (!hasRootMcmeta && nestedMcmetas.length === 1 && topSegments.size === 1) {
+      const candidate = nestedMcmetas[0].cleanName.split('/')[0];
+      if (candidate) {
+        nestedRoot = candidate;
+        mcmetaEntry = nestedMcmetas[0];
+        const expectedPng = `${candidate}/pack.png`.toLowerCase();
+        pngEntry = nestedPngs.find((p) => p.lowerName === expectedPng) || null;
       }
+    }
+
+    return {
+      nestedRoot,
+      mcmetaEntry,
+      pngEntry,
+      isShaderPack: !mcmetaEntry && hasShaders
+    };
+  }
+
+  function normalizeResourcePackBuffer(buffer) {
+    const parsed = parseCentralDirectory(buffer);
+    if (!parsed.validZip || parsed.zip64) {
+      return { buffer, normalized: false, nestedRoot: null };
+    }
+    const layout = detectZipLayout(parsed.entries);
+    if (!layout.nestedRoot) {
+      return { buffer, normalized: false, nestedRoot: null };
+    }
+
+    const encoder = new TextEncoder();
+    const stripPrefix = `${layout.nestedRoot}/`;
+    const stripLower = stripPrefix.toLowerCase();
+    const kept = [];
+
+    for (const e of parsed.entries) {
+      if (e.isJunk || !e.cleanName) continue;
+      if ((e.flags & 0x0001) !== 0) {
+        return { buffer, normalized: false, nestedRoot: null };
+      }
+      if (!e.lowerName.startsWith(stripLower)) continue;
+      const stripped = e.cleanName.slice(stripPrefix.length);
+      if (!stripped) continue;
+      if (e.localHeaderOffset + 30 > parsed.bytes.length) continue;
+      if (parsed.view.getUint32(e.localHeaderOffset, true) !== 0x04034b50) continue;
+      const lNameLen = parsed.view.getUint16(e.localHeaderOffset + 26, true);
+      const lExtraLen = parsed.view.getUint16(e.localHeaderOffset + 28, true);
+      const dataStart = e.localHeaderOffset + 30 + lNameLen + lExtraLen;
+      const dataEnd = dataStart + e.compSize;
+      if (dataEnd > parsed.bytes.length) continue;
+
+      kept.push({
+        entry: e,
+        nameBytes: encoder.encode(stripped),
+        payload: parsed.bytes.subarray(dataStart, dataEnd)
+      });
+    }
+
+    if (kept.length === 0) {
+      return { buffer, normalized: false, nestedRoot: null };
+    }
+
+    let localTotal = 0;
+    let cdTotal = 0;
+    for (const item of kept) {
+      localTotal += 30 + item.nameBytes.length + item.payload.length;
+      cdTotal += 46 + item.nameBytes.length;
+    }
+
+    const out = new Uint8Array(localTotal + cdTotal + 22);
+    const outView = new DataView(out.buffer);
+    const offsets = [];
+    let pos = 0;
+
+    for (const item of kept) {
+      offsets.push(pos);
+      const flags = (item.entry.flags & ~0x0008) | 0x0800;
+      outView.setUint32(pos, 0x04034b50, true);
+      outView.setUint16(pos + 4, 20, true);
+      outView.setUint16(pos + 6, flags, true);
+      outView.setUint16(pos + 8, item.entry.method, true);
+      outView.setUint16(pos + 10, item.entry.dosTime, true);
+      outView.setUint16(pos + 12, item.entry.dosDate, true);
+      outView.setUint32(pos + 14, item.entry.crc32 >>> 0, true);
+      outView.setUint32(pos + 18, item.entry.compSize >>> 0, true);
+      outView.setUint32(pos + 22, item.entry.uncompSize >>> 0, true);
+      outView.setUint16(pos + 26, item.nameBytes.length, true);
+      outView.setUint16(pos + 28, 0, true);
+      pos += 30;
+      out.set(item.nameBytes, pos);
+      pos += item.nameBytes.length;
+      out.set(item.payload, pos);
+      pos += item.payload.length;
+    }
+
+    const cdOffset = pos;
+    for (let i = 0; i < kept.length; i++) {
+      const item = kept[i];
+      const flags = (item.entry.flags & ~0x0008) | 0x0800;
+      outView.setUint32(pos, 0x02014b50, true);
+      outView.setUint16(pos + 4, 0x0314, true);
+      outView.setUint16(pos + 6, 20, true);
+      outView.setUint16(pos + 8, flags, true);
+      outView.setUint16(pos + 10, item.entry.method, true);
+      outView.setUint16(pos + 12, item.entry.dosTime, true);
+      outView.setUint16(pos + 14, item.entry.dosDate, true);
+      outView.setUint32(pos + 16, item.entry.crc32 >>> 0, true);
+      outView.setUint32(pos + 20, item.entry.compSize >>> 0, true);
+      outView.setUint32(pos + 24, item.entry.uncompSize >>> 0, true);
+      outView.setUint16(pos + 28, item.nameBytes.length, true);
+      outView.setUint16(pos + 30, 0, true);
+      outView.setUint16(pos + 32, 0, true);
+      outView.setUint16(pos + 34, 0, true);
+      outView.setUint16(pos + 36, item.entry.internalAttr, true);
+      outView.setUint32(pos + 38, item.entry.externalAttr >>> 0, true);
+      outView.setUint32(pos + 42, offsets[i] >>> 0, true);
+      pos += 46;
+      out.set(item.nameBytes, pos);
+      pos += item.nameBytes.length;
+    }
+
+    const cdSize = pos - cdOffset;
+    outView.setUint32(pos, 0x06054b50, true);
+    outView.setUint16(pos + 4, 0, true);
+    outView.setUint16(pos + 6, 0, true);
+    outView.setUint16(pos + 8, kept.length, true);
+    outView.setUint16(pos + 10, kept.length, true);
+    outView.setUint32(pos + 12, cdSize >>> 0, true);
+    outView.setUint32(pos + 16, cdOffset >>> 0, true);
+    outView.setUint16(pos + 20, 0, true);
+
+    return {
+      buffer: out.buffer,
+      normalized: true,
+      nestedRoot: layout.nestedRoot
+    };
+  }
+
+  async function readZipEntries(buffer) {
+    const out = { mcmeta: null, iconDataUrl: '', hasZipHeader: false, nestedRoot: null, isShaderPack: false };
+    const parsed = parseCentralDirectory(buffer);
+    out.hasZipHeader = parsed.validZip;
+    if (!parsed.validZip || parsed.zip64) return out;
+
+    const layout = detectZipLayout(parsed.entries);
+    out.nestedRoot = layout.nestedRoot;
+    out.isShaderPack = layout.isShaderPack;
+    const decoder = new TextDecoder('utf-8', { fatal: false });
+
+    if (layout.mcmetaEntry) {
+      try {
+        const data = await extractEntryBytes(parsed.view, parsed.bytes, layout.mcmetaEntry, 512 * 1024);
+        if (data) out.mcmeta = decoder.decode(data);
+      } catch { /* ignore */ }
+    }
+    if (layout.pngEntry) {
+      try {
+        const data = await extractEntryBytes(parsed.view, parsed.bytes, layout.pngEntry, 2 * 1024 * 1024);
+        if (data) out.iconDataUrl = bytesToPngDataUrl(data);
+      } catch { /* ignore */ }
     }
     return out;
   }
 
-  async function inspectResourcePackBuffer(buffer, rawFilename) {
+  async function inspectResourcePackBuffer(buffer, rawFilename, extra) {
     const filename = sanitizeResourcePackFilename(rawFilename);
-    const entries = await readZipEntries(buffer).catch(() => ({ mcmeta: null, iconDataUrl: '', hasZipHeader: false }));
+    const entries = await readZipEntries(buffer).catch(() => ({
+      mcmeta: null,
+      iconDataUrl: '',
+      hasZipHeader: false,
+      nestedRoot: null,
+      isShaderPack: false
+    }));
     if (!entries.hasZipHeader) {
       throw new Error(t('rpack.err.invalidZip', { name: filename }, `"${filename}" no es un archivo ZIP válido.`));
     }
-    return extractMcmetaInfo(entries.mcmeta, filename, entries.iconDataUrl);
+    return extractMcmetaInfo(entries.mcmeta, filename, entries.iconDataUrl, {
+      normalized: Boolean(extra && extra.normalized),
+      nestedRoot: entries.nestedRoot,
+      isShaderPack: entries.isShaderPack
+    });
   }
 
   Nexus.resourcePackInspector = Object.freeze({
@@ -375,8 +670,11 @@
     resourcePackFormatForMcVersion,
     evaluateResourcePackCompatibility,
     findIncompatibleEnabledPacks,
+    isLegacyResourcePackMcVersion,
     buildOptionsResourcePacksLine,
+    buildOptionsIncompatiblePacksLine,
     applyResourcePacksToOptionsTxt,
+    normalizeResourcePackBuffer,
     inspectResourcePackBuffer
   });
 })();

@@ -260,6 +260,23 @@
     }
   }
 
+  async function rpackStoreGet(id) {
+    try {
+      const db = await openRpackDb();
+      if (!db) return null;
+      const res = await new Promise((resolve) => {
+        const tx = db.transaction(RPACK_STORE_NAME, 'readonly');
+        const req = tx.objectStore(RPACK_STORE_NAME).get(id);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => resolve(null);
+      });
+      db.close();
+      return res;
+    } catch {
+      return null;
+    }
+  }
+
   async function rpackStoreDelete(id) {
     try {
       const db = await openRpackDb();
@@ -1536,13 +1553,26 @@
           : (store.customMods || [])
               .filter((m) => m && m.enabled && m.filename)
               .map((m) => String(m.filename));
-        const enabledResourcePacks = (store.resourcePacks || [])
-          .filter((p) => p && p.enabled && p.filename)
-          .map((p) => String(p.filename));
         const rpackInspector = window.Nexus && window.Nexus.resourcePackInspector;
+        const enabledPacksTop = (store.resourcePacks || []).filter((p) => p && p.enabled && p.filename);
+        // Minecraft applies resourcePacks bottom-to-top (last entry overrides earlier entries)
+        const enabledResourcePacks = [...enabledPacksTop].reverse().map((p) => String(p.filename));
+        const isLegacyPacks = rpackInspector && typeof rpackInspector.isLegacyResourcePackMcVersion === 'function'
+          ? rpackInspector.isLegacyResourcePackMcVersion(mcVersion)
+          : false;
+        const incompatibleResourcePacks = isLegacyPacks
+          ? []
+          : enabledPacksTop
+              .filter((p) => {
+                if (!rpackInspector || typeof rpackInspector.evaluateResourcePackCompatibility !== 'function') return true;
+                const compat = rpackInspector.evaluateResourcePackCompatibility(p, mcVersion);
+                return compat.status !== 'compatible';
+              })
+              .reverse()
+              .map((p) => String(p.filename));
         const baseOptionsTxt = perfEval ? perfEval.optionsTxt : '';
         const mergedOptionsTxt = rpackInspector && typeof rpackInspector.applyResourcePacksToOptionsTxt === 'function'
-          ? rpackInspector.applyResourcePacksToOptionsTxt(baseOptionsTxt, enabledResourcePacks, mcVersion)
+          ? rpackInspector.applyResourcePacksToOptionsTxt(baseOptionsTxt, enabledResourcePacks, mcVersion, incompatibleResourcePacks)
           : baseOptionsTxt;
 
         const payload = {
@@ -1564,6 +1594,7 @@
           enabledModIds,
           customModFiles,
           enabledResourcePacks,
+          incompatibleResourcePacks,
           optionsTxt: mergedOptionsTxt
         };
 
@@ -1897,17 +1928,51 @@
             const resp = await apiFetchJson('/api/local/resourcepacks');
             const diskFiles = Array.isArray(resp.files) ? resp.files : [];
             const diskMap = new Map(diskFiles.map((f) => [String(f.filename), Number(f.size) || 0]));
+            const inspector = window.Nexus && window.Nexus.resourcePackInspector;
             let changed = false;
 
-            const filtered = store.resourcePacks.filter((p) => {
-              const keep = diskMap.has(String(p.filename));
-              if (!keep) changed = true;
-              return keep;
-            });
-            store.resourcePacks = filtered;
+            const kept = [];
+            for (const p of store.resourcePacks) {
+              if (!p || !p.filename) {
+                changed = true;
+                continue;
+              }
+              if (diskMap.has(String(p.filename))) {
+                kept.push(p);
+                continue;
+              }
+              // Try restoring from IndexedDB if missing on disk
+              const cachedBuf = p.id ? await rpackStoreGet(p.id) : null;
+              if (cachedBuf && cachedBuf.byteLength >= 4) {
+                try {
+                  const norm = inspector && typeof inspector.normalizeResourcePackBuffer === 'function'
+                    ? inspector.normalizeResourcePackBuffer(cachedBuf)
+                    : { buffer: cachedBuf, normalized: false };
+                  const upResp = await fetch(`/api/local/resourcepacks/upload?filename=${encodeURIComponent(p.filename)}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/octet-stream' },
+                    body: norm.buffer
+                  });
+                  const upJson = await upResp.json().catch(() => ({}));
+                  if (upResp.ok && upJson.ok) {
+                    if (upJson.filename && upJson.filename !== p.filename) {
+                      p.filename = String(upJson.filename);
+                    }
+                    p.size = norm.buffer.byteLength;
+                    diskMap.set(p.filename, p.size);
+                    kept.push(p);
+                    changed = true;
+                    continue;
+                  }
+                } catch {
+                  // Ignore upload retry error
+                }
+              }
+              changed = true;
+            }
+            store.resourcePacks = kept;
 
             const knownNames = new Set(store.resourcePacks.map((p) => String(p.filename)));
-            const inspector = window.Nexus && window.Nexus.resourcePackInspector;
             for (const f of diskFiles) {
               const fname = String(f.filename || '');
               if (!fname || knownNames.has(fname)) continue;
@@ -1915,14 +1980,57 @@
                 name: fname.replace(/\.zip$/i, ''),
                 description: '',
                 packFormat: null,
+                minFormat: null,
+                maxFormat: null,
+                mcVersionRangeLabel: '—',
                 hasMcmeta: false,
-                iconDataUrl: ''
+                iconDataUrl: '',
+                normalized: false,
+                isShaderPack: false
               };
+              let finalSize = Number(f.size) || 0;
               try {
                 const fileResp = await fetch(`/api/local/resourcepacks/file?filename=${encodeURIComponent(fname)}`, { cache: 'no-store' });
                 if (fileResp.ok && inspector) {
-                  const buf = await fileResp.arrayBuffer();
-                  meta = await inspector.inspectResourcePackBuffer(buf, fname);
+                  let buf = await fileResp.arrayBuffer();
+                  let didNormalize = false;
+                  if (typeof inspector.normalizeResourcePackBuffer === 'function') {
+                    const norm = inspector.normalizeResourcePackBuffer(buf);
+                    if (norm && norm.normalized) {
+                      buf = norm.buffer;
+                      didNormalize = true;
+                      const upResp = await fetch(`/api/local/resourcepacks/upload?filename=${encodeURIComponent(fname)}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/octet-stream' },
+                        body: buf
+                      }).catch(() => null);
+                      if (upResp && upResp.ok) {
+                        finalSize = buf.byteLength;
+                      }
+                    }
+                  }
+                  meta = await inspector.inspectResourcePackBuffer(buf, fname, { normalized: didNormalize });
+                  const newId = randomId('rpack');
+                  await rpackStorePut(newId, buf);
+                  store.resourcePacks.unshift({
+                    id: newId,
+                    filename: fname,
+                    name: meta.name || fname.replace(/\.zip$/i, ''),
+                    description: meta.description || '',
+                    packFormat: meta.packFormat !== undefined ? meta.packFormat : null,
+                    minFormat: meta.minFormat !== undefined ? meta.minFormat : (meta.packFormat !== undefined ? meta.packFormat : null),
+                    maxFormat: meta.maxFormat !== undefined ? meta.maxFormat : (meta.packFormat !== undefined ? meta.packFormat : null),
+                    mcVersionRangeLabel: meta.mcVersionRangeLabel || '—',
+                    hasMcmeta: Boolean(meta.hasMcmeta),
+                    iconDataUrl: meta.iconDataUrl || '',
+                    normalized: Boolean(meta.normalized),
+                    isShaderPack: Boolean(meta.isShaderPack),
+                    size: finalSize,
+                    enabled: true,
+                    addedAt: new Date().toISOString()
+                  });
+                  changed = true;
+                  continue;
                 }
               } catch {
                 // fallback to filename metadata
@@ -1932,13 +2040,15 @@
                 filename: fname,
                 name: meta.name || fname.replace(/\.zip$/i, ''),
                 description: meta.description || '',
-                packFormat: meta.packFormat !== undefined ? meta.packFormat : null,
-                minFormat: meta.minFormat !== undefined ? meta.minFormat : (meta.packFormat !== undefined ? meta.packFormat : null),
-                maxFormat: meta.maxFormat !== undefined ? meta.maxFormat : (meta.packFormat !== undefined ? meta.packFormat : null),
-                mcVersionRangeLabel: meta.mcVersionRangeLabel || '—',
-                hasMcmeta: Boolean(meta.hasMcmeta),
-                iconDataUrl: meta.iconDataUrl || '',
-                size: Number(f.size) || 0,
+                packFormat: null,
+                minFormat: null,
+                maxFormat: null,
+                mcVersionRangeLabel: '—',
+                hasMcmeta: false,
+                iconDataUrl: '',
+                normalized: false,
+                isShaderPack: false,
+                size: finalSize,
                 enabled: true,
                 addedAt: new Date().toISOString()
               });
@@ -1957,6 +2067,7 @@
         const health = await checkLocalHostHealth();
         let added = 0;
         let skipped = 0;
+        let normalizedCount = 0;
         const errors = [];
 
         for (const file of files) {
@@ -1971,25 +2082,40 @@
             errors.push(tr('rpack.err.tooLarge', { name: rawName }, `"${rawName}" supera el límite de 64 MB.`));
             continue;
           }
-          const buf = await file.arrayBuffer();
-          const bytes = new Uint8Array(buf);
+          const rawBuf = await file.arrayBuffer();
+          const bytes = new Uint8Array(rawBuf);
           if (bytes.length < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
             skipped += 1;
             errors.push(tr('rpack.err.invalidZip', { name: rawName }, `"${rawName}" no tiene una cabecera ZIP válida.`));
             continue;
           }
 
+          let finalBuf = rawBuf;
+          let wasNormalized = false;
+          if (inspector && typeof inspector.normalizeResourcePackBuffer === 'function') {
+            try {
+              const norm = inspector.normalizeResourcePackBuffer(rawBuf);
+              if (norm && norm.normalized && norm.buffer) {
+                finalBuf = norm.buffer;
+                wasNormalized = true;
+                normalizedCount += 1;
+              }
+            } catch {
+              // Keep original buffer if normalization wasn't applicable
+            }
+          }
+
           const filename = inspector ? inspector.sanitizeResourcePackFilename(rawName) : rawName.replace(/[^A-Za-z0-9._+-]/g, '_');
           const meta = inspector
-            ? await inspector.inspectResourcePackBuffer(buf, filename)
-            : { name: filename.replace(/\.zip$/i, ''), description: '', packFormat: null, minFormat: null, maxFormat: null, mcVersionRangeLabel: '—', hasMcmeta: false, iconDataUrl: '' };
+            ? await inspector.inspectResourcePackBuffer(finalBuf, filename, { normalized: wasNormalized })
+            : { name: filename.replace(/\.zip$/i, ''), description: '', packFormat: null, minFormat: null, maxFormat: null, mcVersionRangeLabel: '—', hasMcmeta: false, iconDataUrl: '', normalized: wasNormalized, isShaderPack: false };
 
           let savedFilename = filename;
           if (health.canLaunchJava) {
             const upResp = await fetch(`/api/local/resourcepacks/upload?filename=${encodeURIComponent(filename)}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/octet-stream' },
-              body: buf
+              body: finalBuf
             });
             const upJson = await upResp.json().catch(() => ({}));
             if (!upResp.ok || !upJson.ok) {
@@ -2000,7 +2126,7 @@
 
           const existingIdx = store.resourcePacks.findIndex((p) => p.filename === savedFilename);
           const id = existingIdx >= 0 ? store.resourcePacks[existingIdx].id : randomId('rpack');
-          await rpackStorePut(id, buf);
+          await rpackStorePut(id, finalBuf);
 
           const entry = {
             id,
@@ -2013,7 +2139,9 @@
             mcVersionRangeLabel: meta.mcVersionRangeLabel || '—',
             hasMcmeta: Boolean(meta.hasMcmeta),
             iconDataUrl: meta.iconDataUrl || '',
-            size: file.size || buf.byteLength,
+            normalized: Boolean(meta.normalized || wasNormalized),
+            isShaderPack: Boolean(meta.isShaderPack),
+            size: finalBuf.byteLength || file.size,
             enabled: true,
             addedAt: new Date().toISOString()
           };
@@ -2024,12 +2152,25 @@
           added += 1;
         }
         saveStore();
-        return { added, skipped, errors, items: clone(store.resourcePacks) };
+        return { added, skipped, normalizedCount, errors, items: clone(store.resourcePacks) };
       },
       toggle: async (id, enabled) => {
         const target = store.resourcePacks.find((p) => p.id === id);
         if (!target) throw new Error(tr('rpack.err.notFound', null, 'Resource pack no encontrado.'));
         target.enabled = Boolean(enabled);
+        saveStore();
+        return clone(store.resourcePacks);
+      },
+      reorder: async (id, direction) => {
+        const idx = store.resourcePacks.findIndex((p) => p.id === id);
+        if (idx < 0) return clone(store.resourcePacks);
+        const delta = direction === 'up' ? -1 : direction === 'down' ? 1 : 0;
+        const targetIdx = idx + delta;
+        if (targetIdx < 0 || targetIdx >= store.resourcePacks.length || delta === 0) {
+          return clone(store.resourcePacks);
+        }
+        const [item] = store.resourcePacks.splice(idx, 1);
+        store.resourcePacks.splice(targetIdx, 0, item);
         saveStore();
         return clone(store.resourcePacks);
       },
